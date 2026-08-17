@@ -517,6 +517,20 @@ function encodeDomainNameCanonical(domain) {
     return Buffer.concat([buf, Buffer.from([0x00])]);
 }
 
+// --- ヘルパー関数: DNSKEY レコードから公開鍵バイト列を取得 ---
+function getDnskeyRawKey(dnskeyData) {
+    return dnskeyData.key || dnskeyData.publicKey;
+}
+
+// --- ヘルパー関数: DNSKEY の完全な RDATA (Flags+Protocol+Algorithm+公開鍵) を復元 (RFC 4034) ---
+function buildDnskeyFullRdata(dnskeyData) {
+    const headerBuf = Buffer.alloc(4);
+    headerBuf.writeUInt16BE(dnskeyData.flags, 0);
+    headerBuf.writeUInt8(3, 2); // dns-packet では DNSKEY の Protocol は 3 固定
+    headerBuf.writeUInt8(dnskeyData.algorithm, 3);
+    return Buffer.concat([headerBuf, getDnskeyRawKey(dnskeyData)]);
+}
+
 // --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
 // rrset: 同じ Type Covered を持つ全リソースレコードの配列（RFC 4034 の署名対象RRset）
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
@@ -527,12 +541,8 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     }
     
     // 2. DNSKEYから Key Tag を計算
-    const headerBuf = Buffer.alloc(4);
-    headerBuf.writeUInt16BE(dnskeyRecord.data.flags, 0);
-    headerBuf.writeUInt8(3, 2);
-    headerBuf.writeUInt8(dnskeyRecord.data.algorithm, 3);
-    const rawKeyBuf = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
-    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
+    const rawKeyBuf = getDnskeyRawKey(dnskeyRecord.data);
+    const fullRdata = buildDnskeyFullRdata(dnskeyRecord.data);
     const calculatedKeyTag = calculateKeyTag(dnskeyRecord.data.algorithm, fullRdata);
     
     // 3. Key Tagの確認
@@ -565,13 +575,9 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     // 6. 署名対象RRset（全レコード）を RR ワイヤーフォーマットに変換し、正規順序 (RFC 4034 6.3) に並べ替え
     const ownerNameBuf = encodeDomainNameCanonical(domain);
     const typeCoveredNum = dnsTypes.toType(rrsig.data.typeCovered);
-    const rdataList = (rrset && rrset.length > 0 ? rrset : [dnskeyRecord]).map(r => {
-        const kHeader = Buffer.alloc(4);
-        kHeader.writeUInt16BE(r.data.flags, 0);
-        kHeader.writeUInt8(3, 2);
-        kHeader.writeUInt8(r.data.algorithm, 3);
-        return Buffer.concat([kHeader, r.data.key || r.data.publicKey]);
-    }).sort(Buffer.compare);
+    const rdataList = (rrset && rrset.length > 0 ? rrset : [dnskeyRecord])
+        .map(r => buildDnskeyFullRdata(r.data))
+        .sort(Buffer.compare);
     
     const rrWireBufs = rdataList.map(rdata => {
         const rrHeader = Buffer.alloc(10);
@@ -661,49 +667,17 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             return { match: false, keyTag: null, reason: logWarning(`未対応のDigest Type [${dsRecord.digestType}]`) };
     }
 
-    // 1. ドメイン名をワイヤーフォーマットに変換 (末尾に0x00を付与)
-    const labels = domain.replace(/\.$/, '').split('.');
-    let nameBuf = Buffer.alloc(0);
-    for (const label of labels) {
-        if (!label) continue;
-        const lenBuf = Buffer.from([label.length]);
-        const labelBuf = Buffer.from(label, 'ascii');
-        nameBuf = Buffer.concat([nameBuf, lenBuf, labelBuf]);
-    }
-    nameBuf = Buffer.concat([nameBuf, Buffer.from([0x00])]); 
+    // 1. ドメイン名をワイヤーフォーマットに変換
+    const nameBuf = encodeDomainNameCanonical(domain);
 
     // 2. DNSKEY データバッファの取得
-    const rawKeyBuf = dnskeyData.key || dnskeyData.publicKey;
+    const rawKeyBuf = getDnskeyRawKey(dnskeyData);
     if (!rawKeyBuf) {
         return { match: false, keyTag: null, reason: logError('DNSKEY のデータが取得できません。') };
     }
 
-    // 4バイトの正しい共通ヘッダー（Flags, Protocol, Algorithm）を作成 (RFC 4034)
-    const headerBuf = Buffer.alloc(4);
-    headerBuf.writeUInt16BE(dnskeyData.flags, 0);
-    headerBuf.writeUInt8(3, 2);	// dns-packet では DNSKEYリソースレコードの Protocol は 3 固定
-    headerBuf.writeUInt8(dnskeyData.algorithm, 3);
-
-    let fullRdata;
-
-    // 現在の rawKeyBuf の先頭4バイトが、これから作ろうとしているヘッダーと「完全に一致するか」を判定
-    const hasHeaderAlready = (
-        rawKeyBuf.length >= 4 &&
-        rawKeyBuf.readUInt16BE(0) === dnskeyData.flags &&
-        rawKeyBuf.readUInt8(2) === 3 &&	// dns-packet では DNSKEYリソースレコードの Protocol は 3 固定
-        rawKeyBuf.readUInt8(3) === dnskeyData.algorithm
-    );
-
-    if (hasHeaderAlready) {
-        // すでにヘッダーが含まれているアルゴリズム（ECDSA, Ed25519など）
-        fullRdata = rawKeyBuf;
-    } else {
-        // 4バイト少なくなっているアルゴリズム（RSA系など）
-        // 手動で生成した headerBuf を先頭に結合して、完全な RDATA に復元
-        fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
-    }
-
-    // 3. 正確に復元された RDATA で Key Tag を計算
+    // 3. 正確に復元された RDATA で Key Tag を計算 (RFC 4034)
+    const fullRdata = buildDnskeyFullRdata(dnskeyData);
     const ac = calculateKeyTag(dnskeyData.algorithm, fullRdata);
 
     // 4. ハッシュの計算 (Name + RDATA)
@@ -871,13 +845,7 @@ app.post('/api/validate', async (req, res) => {
             for (const rrsig of dnskeyRrsig) {
                 for (const ksk of kskRecords) {
                     // DNSKEYレコードから Key Tag を計算
-                    const headerBuf = Buffer.alloc(4);
-                    headerBuf.writeUInt16BE(ksk.data.flags, 0);
-                    headerBuf.writeUInt8(3, 2);
-                    headerBuf.writeUInt8(ksk.data.algorithm, 3);
-                    const rawKeyBuf = ksk.data.key || ksk.data.publicKey;
-                    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
-                    const calculatedKeyTag = calculateKeyTag(ksk.data.algorithm, fullRdata);
+                    const calculatedKeyTag = calculateKeyTag(ksk.data.algorithm, buildDnskeyFullRdata(ksk.data));
                     if (ksk.data.algorithm === rrsig.data.algorithm && calculatedKeyTag === rrsig.data.keyTag) {
                         const signatureResult = verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex);
                         logs.push(signatureResult.reason);
