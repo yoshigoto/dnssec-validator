@@ -352,6 +352,218 @@ async function getZoneApex(domain) {
     return { currentNs: currentNs, parentNs: parentNs, zoneApex: zoneApex, rcode: rcode, cdName: cdName };
 }
 
+// --- ヘルパー関数: RRSIG署名の有効期限チェック ---
+function checkSignatureExpiration(rrsig) {
+    const now = Math.floor(Date.now() / 1000); // 現在時刻（秒）
+    const expiration = rrsig.data.expiration;
+    const inception = rrsig.data.inception;
+    
+    if (now < inception) {
+        return { valid: false, reason: logWarning(`署名はまだ有効になっていません (有効期限開始: ${new Date(inception * 1000).toISOString()})`) };
+    }
+    if (now > expiration) {
+        return { valid: false, reason: logWarning(`署名の有効期限が切れています (有効期限終了: ${new Date(expiration * 1000).toISOString()})`) };
+    }
+    return { valid: true };
+}
+
+// --- ヘルパー関数: RSA署名の検証 ---
+function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
+    try {
+        // RSA公開鍵の抽出（DNSKEY形式から）
+        // DNSKEY形式：Flags(2) + Protocol(1) + Algorithm(1) + PublicKey
+        // dnspacketではキーデータは既に処理済みなので、publicKeyBufferは公開鍵部分のみ
+        
+        let keyType = '';
+        switch (algorithm) {
+            case 5:  // RSASHA1
+                keyType = 'sha1';
+                break;
+            case 7:  // RSASHA1-NSEC3-SHA1
+                keyType = 'sha1';
+                break;
+            case 8:  // RSASHA256
+                keyType = 'sha256';
+                break;
+            case 10: // RSASHA512
+                keyType = 'sha512';
+                break;
+            default:
+                return { verified: false, reason: logError(`未対応のRSAアルゴリズム [${algorithm}]`) };
+        }
+        
+        // RSA公開鍵をPEM形式に変換（簡易実装）
+        const publicKeyPEM = `-----BEGIN RSA PUBLIC KEY-----\n${publicKeyBuffer.toString('base64')}\n-----END RSA PUBLIC KEY-----`;
+        
+        // Node.js crypto.createVerify を使用して署名を検証
+        const verifier = crypto.createVerify(`RSA-${keyType.toUpperCase()}`);
+        verifier.update(messageBuffer);
+        
+        const verified = verifier.verify(publicKeyPEM, signatureBuffer);
+        
+        return { 
+            verified, 
+            reason: verified ? 
+                logSuccess(`RSA署名検証成功 (アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
+                logError(`RSA署名検証失敗`)
+        };
+    } catch (err) {
+        return { verified: false, reason: logError(`RSA署名検証エラー: ${err.message}`) };
+    }
+}
+
+// --- ヘルパー関数: ECDSA署名の検証 ---
+function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
+    try {
+        let curveType = '';
+        let hashAlgo = '';
+        switch (algorithm) {
+            case 13: // ECDSAP256SHA256
+                curveType = 'prime256v1';
+                hashAlgo = 'sha256';
+                break;
+            case 14: // ECDSAP384SHA384
+                curveType = 'secp384r1';
+                hashAlgo = 'sha384';
+                break;
+            default:
+                return { verified: false, reason: logError(`未対応のECDSAアルゴリズム [${algorithm}]`) };
+        }
+        
+        // ECDSA公開鍵をPEM形式に変換（簡易実装）
+        const publicKeyPEM = `-----BEGIN EC PUBLIC KEY-----\n${publicKeyBuffer.toString('base64')}\n-----END EC PUBLIC KEY-----`;
+        
+        const verifier = crypto.createVerify(`${hashAlgo.toUpperCase()}`);
+        verifier.update(messageBuffer);
+        
+        const verified = verifier.verify(publicKeyPEM, signatureBuffer);
+        
+        return { 
+            verified, 
+            reason: verified ? 
+                logSuccess(`ECDSA署名検証成功 (アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
+                logError(`ECDSA署名検証失敗`)
+        };
+    } catch (err) {
+        return { verified: false, reason: logError(`ECDSA署名検証エラー: ${err.message}`) };
+    }
+}
+
+// --- ヘルパー関数: EdDSA署名の検証 ---
+function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
+    try {
+        let keyType = '';
+        switch (algorithm) {
+            case 15: // ED25519
+                keyType = 'ed25519';
+                break;
+            case 16: // ED448
+                keyType = 'ed448';
+                break;
+            default:
+                return { verified: false, reason: logError(`未対応のEdDSAアルゴリズム [${algorithm}]`) };
+        }
+        
+        // EdDSA公開鍵を生成
+        const publicKey = crypto.createPublicKey({
+            key: publicKeyBuffer,
+            format: 'raw',
+            type: keyType
+        });
+        
+        const verifier = crypto.createVerify('SHA512'); // EdDSAは内部でハッシュを管理
+        verifier.update(messageBuffer);
+        
+        const verified = verifier.verify(publicKey, signatureBuffer);
+        
+        return { 
+            verified, 
+            reason: verified ? 
+                logSuccess(`EdDSA署名検証成功 (アルゴリズム: ${keyType.toUpperCase()})`) :
+                logError(`EdDSA署名検証失敗`)
+        };
+    } catch (err) {
+        return { verified: false, reason: logError(`EdDSA署名検証エラー: ${err.message}`) };
+    }
+}
+
+// --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
+function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
+    // 1. 署名の有効期限チェック
+    const expirationCheck = checkSignatureExpiration(rrsig);
+    if (!expirationCheck.valid) {
+        return { verified: false, reason: expirationCheck.reason };
+    }
+    
+    // 2. Key Tagの確認
+    if (dnskeyRecord.data.keyTag !== rrsig.data.keyTag) {
+        return { 
+            verified: false, 
+            reason: logWarning(`Key Tag不一致: DNSKEY [${dnskeyRecord.data.keyTag}] vs RRSIG [${rrsig.data.keyTag}]`)
+        };
+    }
+    
+    // 3. アルゴリズムの確認
+    if (dnskeyRecord.data.algorithm !== rrsig.data.algorithm) {
+        return { 
+            verified: false, 
+            reason: logError(`アルゴリズム不一致: DNSKEY [${dnskeyRecord.data.algorithm}] vs RRSIG [${rrsig.data.algorithm}]`)
+        };
+    }
+    
+    // 4. ドメイン名をワイヤーフォーマットに変換
+    const labels = domain.replace(/\.$/, '').split('.');
+    let nameBuf = Buffer.alloc(0);
+    for (const label of labels) {
+        if (!label) continue;
+        const lenBuf = Buffer.from([label.length]);
+        const labelBuf = Buffer.from(label, 'ascii');
+        nameBuf = Buffer.concat([nameBuf, lenBuf, labelBuf]);
+    }
+    nameBuf = Buffer.concat([nameBuf, Buffer.from([0x00])]);
+    
+    // 5. メッセージ（署名対象）を構築
+    const headerBuf = Buffer.alloc(4);
+    headerBuf.writeUInt16BE(dnskeyRecord.data.flags, 0);
+    headerBuf.writeUInt8(3, 2);
+    headerBuf.writeUInt8(dnskeyRecord.data.algorithm, 3);
+    
+    const rawKeyBuf = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
+    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
+    const messageBuffer = Buffer.concat([nameBuf, fullRdata]);
+    
+    // 6. 公開鍵を抽出
+    const publicKeyBuffer = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
+    if (!publicKeyBuffer) {
+        return { verified: false, reason: logError('DNSKEY から公開鍵を抽出できません') };
+    }
+    
+    // 7. 署名データを取得
+    const signatureBuffer = rrsig.data.signature;
+    if (!signatureBuffer) {
+        return { verified: false, reason: logError('RRSIG から署名データを抽出できません') };
+    }
+    
+    // 8. アルゴリズムに応じて署名を検証
+    const algorithm = dnskeyRecord.data.algorithm;
+    let signatureResult;
+    
+    if (algorithm === 5 || algorithm === 7 || algorithm === 8 || algorithm === 10) {
+        // RSA系アルゴリズム
+        signatureResult = verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 13 || algorithm === 14) {
+        // ECDSA系アルゴリズム
+        signatureResult = verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 15 || algorithm === 16) {
+        // EdDSA系アルゴリズム
+        signatureResult = verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else {
+        return { verified: false, reason: logError(`未対応の暗号アルゴリズム [${algorithm}]`) };
+    }
+    
+    return signatureResult;
+}
+
 // --- ヘルパー関数: アルゴリズムごとの特性を考慮した正確な Key Tag 計算 ---
 function calculateKeyTag(algorithm, fullRdata) {
     // 1. アルゴリズム 1 (RSAMD5) の場合
@@ -597,6 +809,36 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
         }
         logs.push(logSuccess(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
+        
+        // 3.5. DNSKEY レコード署名検証（オプション）
+        const dnskeyRrsig = dnskeyInfo.rrsigRecords;
+        if (dnskeyRrsig.length > 0) {
+            logs.push(logSuccess(`DNSKEY レコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
+            
+            // DNSKEY レコード署名を検証（自己署名KSKで検証）
+            const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
+            let signatureVerified = false;
+            
+            for (const rrsig of dnskeyRrsig) {
+                for (const ksk of kskRecords) {
+                    if (ksk.data.algorithm === rrsig.data.algorithm && ksk.data.keyTag === rrsig.data.keyTag) {
+                        const signatureResult = verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex);
+                        logs.push(signatureResult.reason);
+                        if (signatureResult.verified) {
+                            signatureVerified = true;
+                        }
+                    }
+                }
+            }
+            
+            if (signatureVerified) {
+                logs.push(logSuccess('DNSKEY レコード署名検証成功'));
+            } else {
+                logs.push(logWarning('DNSKEY レコード署名検証失敗 - ただし信頼の連鎖検証は続行します'));
+            }
+        } else {
+            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりません'));
+        }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
         let matchFound = false;
