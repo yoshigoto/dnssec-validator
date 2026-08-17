@@ -694,7 +694,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
                 warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n   ➕️ハッシュ値: ${calculatedDigest}`);
+            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n➕️ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -703,14 +703,14 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             return {
                 match: false,
                 keyTag: ac,
-                reason: logWarning(`【ハッシュミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n   ➕️子の計算ハッシュ値: ${calculatedDigest}\n   ➕️親の想定ハッシュ値: ${targetDigest}`) };
+                reason: logWarning(`【ハッシュミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n➕️子の計算ハッシュ値: ${calculatedDigest}\n➕️親の想定ハッシュ値: ${targetDigest}`) };
         }
     }
 
     return { 
         match: false,
         keyTag: ac,
-        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
+        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
     };
 }
 
@@ -832,11 +832,21 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
         }
         logs.push(logSuccess(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
+        for (const dnskey of dnskeyRecords) {
+            logs.push(logDetail(`flags: ${dnskey.data.flags}, protocol: 3, algorithm: ${dnskey.data.algorithm}, keyTag: ${calculateKeyTag(dnskey.data.algorithm, buildDnskeyFullRdata(dnskey.data))}`));
+            logs.push(logDetail(`publicKey: ${dnskey.data.key.toString('base64')}`));
+        }
         
         // 3.5. DNSKEY レコード署名検証（オプション）
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
         if (dnskeyRrsig.length > 0) {
             logs.push(logSuccess(`DNSKEY レコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
+            for (const rrsig of dnskeyRrsig) {
+                logs.push(logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`));
+                logs.push(logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`));
+                logs.push(logDetail(`expiration: ${new Date(rrsig.data.expiration * 1000).toISOString()}, inception: ${new Date(rrsig.data.inception * 1000).toISOString()}`));
+                logs.push(logDetail(`signature: ${rrsig.data.signature.toString('base64')}`));
+            }
             
             // DNSKEY レコード署名を検証（自己署名KSKで検証）
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
