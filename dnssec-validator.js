@@ -625,18 +625,14 @@ function calculateKeyTag(algorithm, fullRdata) {
         return fullRdata.readUInt16BE(fullRdata.length - 3);
     }
 
-    // 2. Ed25519 (15) または Ed448 (16) の場合
-    // EdDSA系は16ビットをリトルエンディアンで読み出す
-    const isEdDSA = (algorithm === 15 || algorithm === 16);
-
-    // 3. RFC 4034 Appendix B. Key Tag Calculation
+    // 2. RFC 4034 Appendix B. Key Tag Calculation（RSAMD5以外は全アルゴリズム共通・ビッグエンディアン）
     let ac = 0;
     for (let i = 0; i < fullRdata.length; i += 2) {
         let val = 0;
         if (i + 1 < fullRdata.length) {
-            val = isEdDSA ? fullRdata.readUInt16LE(i) : fullRdata.readUInt16BE(i);
+            val = fullRdata.readUInt16BE(i);
         } else {
-            val = isEdDSA ? fullRdata.readUInt8(i) : (fullRdata.readUInt8(i) << 8);
+            val = fullRdata.readUInt8(i) << 8;
         }
         ac += val;
     }
