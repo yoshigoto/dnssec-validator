@@ -472,34 +472,31 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
 // --- ヘルパー関数: EdDSA署名の検証 ---
 function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
     try {
-        let keyType = '';
+        let crvName = '';
         switch (algorithm) {
             case 15: // ED25519
-                keyType = 'ed25519';
+                crvName = 'Ed25519';
                 break;
             case 16: // ED448
-                keyType = 'ed448';
+                crvName = 'Ed448';
                 break;
             default:
                 return { verified: false, reason: logError(`未対応のEdDSAアルゴリズム [${algorithm}]`) };
         }
         
-        // EdDSA公開鍵を生成
+        // DNSKEY の生の公開鍵バイト列を JWK (OKP) 形式に変換して公開鍵を生成
         const publicKey = crypto.createPublicKey({
-            key: publicKeyBuffer,
-            format: 'raw',
-            type: keyType
+            key: { kty: 'OKP', crv: crvName, x: publicKeyBuffer.toString('base64url') },
+            format: 'jwk'
         });
         
-        const verifier = crypto.createVerify('SHA512'); // EdDSAは内部でハッシュを管理
-        verifier.update(messageBuffer);
-        
-        const verified = verifier.verify(publicKey, signatureBuffer);
+        // EdDSA は事前ハッシュを行わないため、createVerify ではなくワンショット API を使用する
+        const verified = crypto.verify(null, messageBuffer, publicKey, signatureBuffer);
         
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`EdDSA署名検証成功 (アルゴリズム: ${keyType.toUpperCase()})`) :
+                logSuccess(`EdDSA署名検証成功 (アルゴリズム: ${crvName.toUpperCase()})`) :
                 logError(`EdDSA署名検証失敗`)
         };
     } catch (err) {
