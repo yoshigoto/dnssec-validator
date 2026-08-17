@@ -2,6 +2,7 @@ const express = require('express');
 const net = require('net');
 const dgram = require('dgram');
 const dnsPacket = require('dns-packet');	// https://github.com/mafintosh/dns-packet
+const dnsTypes = require('dns-packet/types');
 const crypto = require('crypto');
 
 const app = express();
@@ -415,28 +416,37 @@ function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, alg
 // --- ヘルパー関数: ECDSA署名の検証 ---
 function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
     try {
-        let curveType = '';
+        let curveName = '';
         let hashAlgo = '';
+        let coordLen = 0;
         switch (algorithm) {
             case 13: // ECDSAP256SHA256
-                curveType = 'prime256v1';
+                curveName = 'P-256';
                 hashAlgo = 'sha256';
+                coordLen = 32;
                 break;
             case 14: // ECDSAP384SHA384
-                curveType = 'secp384r1';
+                curveName = 'P-384';
                 hashAlgo = 'sha384';
+                coordLen = 48;
                 break;
             default:
                 return { verified: false, reason: logError(`未対応のECDSAアルゴリズム [${algorithm}]`) };
         }
         
-        // ECDSA公開鍵をPEM形式に変換（簡易実装）
-        const publicKeyPEM = `-----BEGIN EC PUBLIC KEY-----\n${publicKeyBuffer.toString('base64')}\n-----END EC PUBLIC KEY-----`;
+        // DNSKEY の生の座標(X||Y)を JWK 形式に変換して公開鍵を生成
+        const x = publicKeyBuffer.subarray(0, coordLen);
+        const y = publicKeyBuffer.subarray(coordLen, coordLen * 2);
+        const publicKey = crypto.createPublicKey({
+            key: { kty: 'EC', crv: curveName, x: x.toString('base64url'), y: y.toString('base64url') },
+            format: 'jwk'
+        });
         
-        const verifier = crypto.createVerify(`${hashAlgo.toUpperCase()}`);
+        const verifier = crypto.createVerify(hashAlgo.toUpperCase());
         verifier.update(messageBuffer);
         
-        const verified = verifier.verify(publicKeyPEM, signatureBuffer);
+        // DNSSEC の署名は r||s の固定長(IEEE P1363)形式のため、そのまま検証可能
+        const verified = verifier.verify({ key: publicKey, dsaEncoding: 'ieee-p1363' }, signatureBuffer);
         
         return { 
             verified, 
@@ -487,7 +497,21 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
     }
 }
 
+// --- ヘルパー関数: ドメイン名をDNSワイヤーフォーマットに変換（正規化・非圧縮） ---
+function encodeDomainNameCanonical(domain) {
+    const labels = domain.replace(/\.$/, '').toLowerCase().split('.');
+    let buf = Buffer.alloc(0);
+    for (const label of labels) {
+        if (!label) continue;
+        const lenBuf = Buffer.from([label.length]);
+        const labelBuf = Buffer.from(label, 'ascii');
+        buf = Buffer.concat([buf, lenBuf, labelBuf]);
+    }
+    return Buffer.concat([buf, Buffer.from([0x00])]);
+}
+
 // --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
+// rrset: 同じ Type Covered を持つ全リソースレコードの配列（RFC 4034 の署名対象RRset）
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     // 1. 署名の有効期限チェック
     const expirationCheck = checkSignatureExpiration(rrsig);
@@ -495,15 +519,24 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
         return { verified: false, reason: expirationCheck.reason };
     }
     
-    // 2. Key Tagの確認
-    if (dnskeyRecord.data.keyTag !== rrsig.data.keyTag) {
+    // 2. DNSKEYから Key Tag を計算
+    const headerBuf = Buffer.alloc(4);
+    headerBuf.writeUInt16BE(dnskeyRecord.data.flags, 0);
+    headerBuf.writeUInt8(3, 2);
+    headerBuf.writeUInt8(dnskeyRecord.data.algorithm, 3);
+    const rawKeyBuf = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
+    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
+    const calculatedKeyTag = calculateKeyTag(dnskeyRecord.data.algorithm, fullRdata);
+    
+    // 3. Key Tagの確認
+    if (calculatedKeyTag !== rrsig.data.keyTag) {
         return { 
             verified: false, 
-            reason: logWarning(`Key Tag不一致: DNSKEY [${dnskeyRecord.data.keyTag}] vs RRSIG [${rrsig.data.keyTag}]`)
+            reason: logWarning(`Key Tag不一致: DNSKEY [${calculatedKeyTag}] vs RRSIG [${rrsig.data.keyTag}]`)
         };
     }
     
-    // 3. アルゴリズムの確認
+    // 4. アルゴリズムの確認
     if (dnskeyRecord.data.algorithm !== rrsig.data.algorithm) {
         return { 
             verified: false, 
@@ -511,40 +544,53 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
         };
     }
     
-    // 4. ドメイン名をワイヤーフォーマットに変換
-    const labels = domain.replace(/\.$/, '').split('.');
-    let nameBuf = Buffer.alloc(0);
-    for (const label of labels) {
-        if (!label) continue;
-        const lenBuf = Buffer.from([label.length]);
-        const labelBuf = Buffer.from(label, 'ascii');
-        nameBuf = Buffer.concat([nameBuf, lenBuf, labelBuf]);
-    }
-    nameBuf = Buffer.concat([nameBuf, Buffer.from([0x00])]);
+    // 5. RRSIG RDATA（署名フィールドを除く）をワイヤーフォーマットで構築 (RFC 4034 3.1.8.1)
+    const signerNameBuf = encodeDomainNameCanonical(rrsig.data.signersName || domain);
+    const rrsigRdataHeader = Buffer.alloc(18);
+    rrsigRdataHeader.writeUInt16BE(dnsTypes.toType(rrsig.data.typeCovered), 0);
+    rrsigRdataHeader.writeUInt8(rrsig.data.algorithm, 2);
+    rrsigRdataHeader.writeUInt8(rrsig.data.labels, 3);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.expiration, 8);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.inception, 12);
+    rrsigRdataHeader.writeUInt16BE(rrsig.data.keyTag, 16);
     
-    // 5. メッセージ（署名対象）を構築
-    const headerBuf = Buffer.alloc(4);
-    headerBuf.writeUInt16BE(dnskeyRecord.data.flags, 0);
-    headerBuf.writeUInt8(3, 2);
-    headerBuf.writeUInt8(dnskeyRecord.data.algorithm, 3);
+    // 6. 署名対象RRset（全レコード）を RR ワイヤーフォーマットに変換し、正規順序 (RFC 4034 6.3) に並べ替え
+    const ownerNameBuf = encodeDomainNameCanonical(domain);
+    const typeCoveredNum = dnsTypes.toType(rrsig.data.typeCovered);
+    const rdataList = (rrset && rrset.length > 0 ? rrset : [dnskeyRecord]).map(r => {
+        const kHeader = Buffer.alloc(4);
+        kHeader.writeUInt16BE(r.data.flags, 0);
+        kHeader.writeUInt8(3, 2);
+        kHeader.writeUInt8(r.data.algorithm, 3);
+        return Buffer.concat([kHeader, r.data.key || r.data.publicKey]);
+    }).sort(Buffer.compare);
     
-    const rawKeyBuf = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
-    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
-    const messageBuffer = Buffer.concat([nameBuf, fullRdata]);
+    const rrWireBufs = rdataList.map(rdata => {
+        const rrHeader = Buffer.alloc(10);
+        rrHeader.writeUInt16BE(typeCoveredNum, 0);
+        rrHeader.writeUInt16BE(1, 2); // CLASS IN
+        rrHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+        rrHeader.writeUInt16BE(rdata.length, 8);
+        return Buffer.concat([ownerNameBuf, rrHeader, rdata]);
+    });
     
-    // 6. 公開鍵を抽出
-    const publicKeyBuffer = dnskeyRecord.data.key || dnskeyRecord.data.publicKey;
+    // 7. メッセージ（署名対象）を構築 = RRSIG_RDATA + 正規順序のRRset
+    const messageBuffer = Buffer.concat([rrsigRdataHeader, signerNameBuf, ...rrWireBufs]);
+    
+    // 8. 公開鍵を抽出
+    const publicKeyBuffer = rawKeyBuf;
     if (!publicKeyBuffer) {
         return { verified: false, reason: logError('DNSKEY から公開鍵を抽出できません') };
     }
     
-    // 7. 署名データを取得
+    // 9. 署名データを取得
     const signatureBuffer = rrsig.data.signature;
     if (!signatureBuffer) {
         return { verified: false, reason: logError('RRSIG から署名データを抽出できません') };
     }
     
-    // 8. アルゴリズムに応じて署名を検証
+    // 10. アルゴリズムに応じて署名を検証
     const algorithm = dnskeyRecord.data.algorithm;
     let signatureResult;
     
@@ -821,7 +867,15 @@ app.post('/api/validate', async (req, res) => {
             
             for (const rrsig of dnskeyRrsig) {
                 for (const ksk of kskRecords) {
-                    if (ksk.data.algorithm === rrsig.data.algorithm && ksk.data.keyTag === rrsig.data.keyTag) {
+                    // DNSKEYレコードから Key Tag を計算
+                    const headerBuf = Buffer.alloc(4);
+                    headerBuf.writeUInt16BE(ksk.data.flags, 0);
+                    headerBuf.writeUInt8(3, 2);
+                    headerBuf.writeUInt8(ksk.data.algorithm, 3);
+                    const rawKeyBuf = ksk.data.key || ksk.data.publicKey;
+                    const fullRdata = Buffer.concat([headerBuf, rawKeyBuf]);
+                    const calculatedKeyTag = calculateKeyTag(ksk.data.algorithm, fullRdata);
+                    if (ksk.data.algorithm === rrsig.data.algorithm && calculatedKeyTag === rrsig.data.keyTag) {
                         const signatureResult = verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex);
                         logs.push(signatureResult.reason);
                         if (signatureResult.verified) {
