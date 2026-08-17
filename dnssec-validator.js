@@ -7,6 +7,70 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
+// --- 定数定義 ---
+const ROOT_NAMESERVER = 'a.root-servers.net';
+const MAX_RECURSION_DEPTH = 10;
+const DNS_QUERY_TIMEOUT = 5000;
+const MAX_DOMAIN_LENGTH = 253;
+const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
+const rateLimitMap = new Map(); // IP: { count, resetTime }
+
+// --- ドメイン名バリデーション関数 ---
+function validateDomainName(domain) {
+    if (!domain || typeof domain !== 'string') {
+        return { valid: false, error: 'ドメイン名は空ではない文字列である必要があります' };
+    }
+    
+    // DNS インジェクション対策: 危険な文字をフィルタ
+    if (/[;\\\"'<>()\[\]{}|`~!@#$%^&*+=\s]/g.test(domain)) {
+        return { valid: false, error: 'ドメイン名に無効な文字が含まれています' };
+    }
+    
+    // 長さチェック
+    if (domain.length > MAX_DOMAIN_LENGTH) {
+        return { valid: false, error: `ドメイン名が長すぎます (最大: ${MAX_DOMAIN_LENGTH}文字)` };
+    }
+    
+    // ドメイン名フォーマットチェック
+    const domainRegex = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.?$/i;
+    if (!domainRegex.test(domain)) {
+        return { valid: false, error: 'ドメイン名の形式が無効です' };
+    }
+    
+    return { valid: true };
+}
+
+// --- ドメイン名正規化関数 ---
+function normalizeDomainName(domain) {
+    return domain.toLowerCase().replace(/\.$/, ''); // 末尾のドット削除、小文字化
+}
+
+// --- レート制限チェック関数 ---
+function checkRateLimit(clientIp) {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+    
+    if (!rateLimitMap.has(clientIp)) {
+        rateLimitMap.set(clientIp, { count: 1, resetTime: now + 60000 });
+        return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - 1 };
+    }
+    
+    const record = rateLimitMap.get(clientIp);
+    if (now > record.resetTime) {
+        // リセット
+        rateLimitMap.set(clientIp, { count: 1, resetTime: now + 60000 });
+        return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - 1 };
+    }
+    
+    if (record.count >= RATE_LIMIT_REQUESTS_PER_MINUTE) {
+        const waitSeconds = Math.ceil((record.resetTime - now) / 1000);
+        return { allowed: false, remaining: 0, waitSeconds };
+    }
+    
+    record.count++;
+    return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
+}
+
 // --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 ---
 function queryDnsUdp(serverIp, buf, timeout = 5000) {
     return new Promise((resolve, reject) => {
@@ -105,36 +169,49 @@ async function getResourceRecord(domain, serverIp, rType) {
     return { resourceRecords: resourceRecords, rrsigRecords: rrsigRecords };
 }
 
-// --- ヘルパー関数: Aレコードを取得する ---
+// --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
 async function getARecord(domain) {
-    let currentNs = 'a.root-servers.net';
+    let currentNs = ROOT_NAMESERVER;
     let ipAddress = '';
 
-    for (i = 0; i < 10; i++) {
-        const buf = dnsPacket.encode({
-            type: 'query',
-            id: Math.floor(Math.random() * 65535),
-            questions: [{ type: 'A', name: domain }],
-            additionals: [{ type: 'OPT', name: '.', udpPayloadSize: 1232 }]
-        });
-        const msg = await queryDnsUdp(currentNs, buf);
-        const res = dnsPacket.decode(msg);
-        const aRecord = res.answers.find(a => a.type === 'A');
-        if (aRecord) {
-            ipAddress = aRecord.data;
-            break;
-        }
-        const nsAuthRecord = res.authorities.find(a => a.type === 'NS');
-        if (nsAuthRecord) {
-            currentNs = nsAuthRecord.data;
+    for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
+        try {
+            const buf = dnsPacket.encode({
+                type: 'query',
+                id: Math.floor(Math.random() * 65535),
+                questions: [{ type: 'A', name: domain }],
+                additionals: [{ type: 'OPT', name: '.', udpPayloadSize: 1232 }]
+            });
+            const msg = await queryDnsUdp(currentNs, buf);
+            const res = dnsPacket.decode(msg);
+            const aRecord = res.answers.find(a => a.type === 'A');
+            if (aRecord) {
+                ipAddress = aRecord.data;
+                break;
+            }
+            const nsAuthRecord = res.authorities.find(a => a.type === 'NS');
+            if (nsAuthRecord) {
+                currentNs = nsAuthRecord.data;
+            } else {
+                throw new Error(`${currentNs} から A レコードの委任情報が得られません`);
+            }
+        } catch (err) {
+            if (i === MAX_RECURSION_DEPTH - 1) {
+                throw new Error(`A レコード取得失敗 [${domain}]: ${err.message}`);
+            }
         }
     }
+    
+    if (!ipAddress) {
+        throw new Error(`A レコード取得失敗 [${domain}]: ${MAX_RECURSION_DEPTH} 回の再帰でも IP アドレスが見つかりません`);
+    }
+    
     return ipAddress;
 }
 
-// --- ヘルパー関数: ゾーン頂点をルートから辿って取得する ---
+// --- ヘルパー関数: ゾーン頂点をルートから辿って取得する (エラーハンドリング強化版) ---
 async function getZoneApex(domain) {
-    let currentNs = 'a.root-servers.net';
+    let currentNs = ROOT_NAMESERVER;
     let parentNs = '';
     let zoneApex = '';
     let rcode = '';
@@ -357,13 +434,28 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     };
 }
 
-// --- メイン検証 API ---
+// --- メイン検証 API (入力バリデーション・レート制限強化版) ---
 app.post('/api/validate', async (req, res) => {
     let { domain } = req.body;
-    if (!domain) {
-        return res.status(400).json({ error: 'ドメイン名を入力してください' });
+    const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
+    
+    // 入力バリデーション
+    const validation = validateDomainName(domain);
+    if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+    }
+    
+    // レート制限チェック
+    const rateLimit = checkRateLimit(clientIp);
+    if (!rateLimit.allowed) {
+        return res.status(429).json({ 
+            error: `リクエスト制限に達しました。${rateLimit.waitSeconds}秒後に再度お試しください。` 
+        });
     }
 
+    // ドメイン名を正規化
+    domain = normalizeDomainName(domain);
+    
     let logs = [];
     let success = false;
 
@@ -383,18 +475,40 @@ app.post('/api/validate', async (req, res) => {
         }
         logs.push(`ℹ️ ゾーン頂点は ${zoneApexInfo.zoneApex} 、親候補は ${tempLog}${zoneApexInfo.currentNs} です。`);
 
-        // 2. 親サーバーから DSレコードを取得
+        // 2. 親サーバーから DSレコードを取得 (エラーハンドリング強化版)
         let targetNs = zoneApexInfo.parentNs;
-        let parentIp = await getARecord(targetNs);
-        let dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+        let parentIp = '';
+        let dsInfo = null;
+        
+        try {
+            if (targetNs) {
+                parentIp = await getARecord(targetNs);
+                dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+            }
+        } catch (err) {
+            logs.push(`⚠️ 親サーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
+            parentIp = '';
+        }
+        
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-            targetNs = zoneApexInfo.currentNs;
-            parentIp = await getARecord(targetNs);
-            dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+            try {
+                targetNs = zoneApexInfo.currentNs;
+                parentIp = await getARecord(targetNs);
+                dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+            } catch (err) {
+                logs.push(`⚠️ 現在のサーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
+                parentIp = '';
+            }
+            
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
                 return res.json({ success: false, logs: [...logs, '⚠️ 親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'] });
             }
         }
+        
+        if (!parentIp) {
+            return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'] });
+        }
+        
         logs.push(`ℹ️ 親サーバーは ${targetNs} (${parentIp}) で確定しました。`);
         const dsRecords = dsInfo.resourceRecords;
         logs.push(`✅ 親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`);
@@ -413,13 +527,26 @@ app.post('/api/validate', async (req, res) => {
             }
         }
 
-        // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得
-        let childIp = await getARecord(zoneApexInfo.currentNs);
+        // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得 (エラーハンドリング強化版)
+        let childIp = '';
+        try {
+            childIp = await getARecord(zoneApexInfo.currentNs);
+        } catch (err) {
+            return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`] });
+        }
+        
         logs.push(`ℹ️ 子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`);
-        if (parentIp === childIp) {
+        if (parentIp && parentIp === childIp) {
             logs.push(`ℹ️ このゾーン頂点は親子同居のようです。`);
         }
-        const dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
+        
+        let dnskeyInfo = null;
+        try {
+            dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
+        } catch (err) {
+            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEY レコード取得失敗: ${err.message}`] });
+        }
+        
         const dnskeyRecords = dnskeyInfo.resourceRecords;
         if (dnskeyRecords.length === 0) {
             return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
@@ -446,7 +573,9 @@ app.post('/api/validate', async (req, res) => {
         res.json({ success, logs });
 
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        const errorMsg = `🔴 予期しないエラーが発生しました: ${err.message}`;
+        logs.push(errorMsg);
+        res.status(500).json({ error: errorMsg, logs });
     }
 });
 
