@@ -371,10 +371,6 @@ function checkSignatureExpiration(rrsig) {
 // --- ヘルパー関数: RSA署名の検証 ---
 function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
     try {
-        // RSA公開鍵の抽出（DNSKEY形式から）
-        // DNSKEY形式：Flags(2) + Protocol(1) + Algorithm(1) + PublicKey
-        // dnspacketではキーデータは既に処理済みなので、publicKeyBufferは公開鍵部分のみ
-        
         let keyType = '';
         switch (algorithm) {
             case 5:  // RSASHA1
@@ -393,14 +389,28 @@ function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, alg
                 return { verified: false, reason: logError(`未対応のRSAアルゴリズム [${algorithm}]`) };
         }
         
-        // RSA公開鍵をPEM形式に変換（簡易実装）
-        const publicKeyPEM = `-----BEGIN RSA PUBLIC KEY-----\n${publicKeyBuffer.toString('base64')}\n-----END RSA PUBLIC KEY-----`;
+        // DNSKEY の RSA公開鍵 (RFC 3110) を解析: Exponent Length + Exponent + Modulus
+        let offset = 0;
+        let expLen = publicKeyBuffer.readUInt8(0);
+        offset = 1;
+        if (expLen === 0) {
+            expLen = publicKeyBuffer.readUInt16BE(1);
+            offset = 3;
+        }
+        const exponent = publicKeyBuffer.subarray(offset, offset + expLen);
+        const modulus = publicKeyBuffer.subarray(offset + expLen);
+        
+        // JWK 形式に変換して公開鍵を生成
+        const publicKeyObj = crypto.createPublicKey({
+            key: { kty: 'RSA', n: modulus.toString('base64url'), e: exponent.toString('base64url') },
+            format: 'jwk'
+        });
         
         // Node.js crypto.createVerify を使用して署名を検証
-        const verifier = crypto.createVerify(`RSA-${keyType.toUpperCase()}`);
+        const verifier = crypto.createVerify(keyType.toUpperCase());
         verifier.update(messageBuffer);
         
-        const verified = verifier.verify(publicKeyPEM, signatureBuffer);
+        const verified = verifier.verify(publicKeyObj, signatureBuffer);
         
         return { 
             verified, 
