@@ -11,9 +11,54 @@ app.use(express.json());
 const ROOT_NAMESERVER = 'a.root-servers.net';
 const MAX_RECURSION_DEPTH = 10;
 const DNS_QUERY_TIMEOUT = 5000;
+const DNS_UDP_PAYLOAD_SIZE = 1232;
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
+
+// --- ログレベル定数 ---
+const LOG_LEVEL = {
+    INFO: 'ℹ️',
+    SUCCESS: '✅',
+    WARNING: '⚠️',
+    ERROR: '❌',
+    DETAIL: '➕️',
+    CRITICAL: '🔴',
+    COMPLETE: '🎉'
+};
+
+// --- ログ出力ヘルパー関数 ---
+function createLog(level, message) {
+    return `${level} ${message}`;
+}
+
+function logInfo(message) {
+    return createLog(LOG_LEVEL.INFO, message);
+}
+
+function logSuccess(message) {
+    return createLog(LOG_LEVEL.SUCCESS, message);
+}
+
+function logWarning(message) {
+    return createLog(LOG_LEVEL.WARNING, message);
+}
+
+function logError(message) {
+    return createLog(LOG_LEVEL.ERROR, message);
+}
+
+function logDetail(message) {
+    return createLog(LOG_LEVEL.DETAIL, message);
+}
+
+function logCritical(message) {
+    return createLog(LOG_LEVEL.CRITICAL, message);
+}
+
+function logComplete(message) {
+    return createLog(LOG_LEVEL.COMPLETE, message);
+}
 
 // --- ドメイン名バリデーション関数 ---
 function validateDomainName(domain) {
@@ -72,7 +117,7 @@ function checkRateLimit(clientIp) {
 }
 
 // --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 ---
-function queryDnsUdp(serverIp, buf, timeout = 5000) {
+function queryDnsUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
     return new Promise((resolve, reject) => {
         const client = dgram.createSocket('udp4');
         const timer = setTimeout(() => {
@@ -145,7 +190,7 @@ async function getResourceRecord(domain, serverIp, rType) {
         type: 'query',
         id: Math.floor(Math.random() * 65535),
         questions: [{ type: rType, name: domain }],
-        additionals: [{ type: 'OPT', name: '.', udpPayloadSize: 1232, flags: dnsPacket.DNSSEC_OK }]
+        additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE, flags: dnsPacket.DNSSEC_OK }]
     });
     let msg = await queryDnsUdp(serverIp, buf);
     let res = dnsPacket.decode(msg);
@@ -180,7 +225,7 @@ async function getARecord(domain) {
                 type: 'query',
                 id: Math.floor(Math.random() * 65535),
                 questions: [{ type: 'A', name: domain }],
-                additionals: [{ type: 'OPT', name: '.', udpPayloadSize: 1232 }]
+                additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
             });
             const msg = await queryDnsUdp(currentNs, buf);
             const res = dnsPacket.decode(msg);
@@ -222,7 +267,7 @@ async function getZoneApex(domain) {
             type: 'query',
             id: Math.floor(Math.random() * 65535),
             questions: [{ type: 'SOA', name: domain }],
-            additionals: [{ type: 'OPT', name: '.', udpPayloadSize: 1232 }]
+            additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
         });
         let msg = await queryDnsUdp(currentNs, buf);
         let res = dnsPacket.decode(msg);
@@ -352,7 +397,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
         case 2: algoName = 'sha256'; break;
         case 4: algoName = 'sha384'; break;
         default:
-            return { match: false, keyTag: null, reason: `⚠️ 未対応のDigest Type [${dsRecord.digestType}]` };
+            return { match: false, keyTag: null, reason: logWarning(`未対応のDigest Type [${dsRecord.digestType}]`) };
     }
 
     // 1. ドメイン名をワイヤーフォーマットに変換 (末尾に0x00を付与)
@@ -369,7 +414,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     // 2. DNSKEY データバッファの取得
     const rawKeyBuf = dnskeyData.key || dnskeyData.publicKey;
     if (!rawKeyBuf) {
-        return { match: false, keyTag: null, reason: '❌ DNSKEY のデータが取得できません。' };
+        return { match: false, keyTag: null, reason: logError('DNSKEY のデータが取得できません。') };
     }
 
     // 4バイトの正しい共通ヘッダー（Flags, Protocol, Algorithm）を作成 (RFC 4034)
@@ -412,9 +457,9 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
         if (calculatedDigest === targetDigest) {
             let warnings = [];
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
-                warnings.push(`⚠️ 【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`);
+                warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = `🟢 【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n   ➕️ハッシュ値: ${calculatedDigest}`;
+            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n   ➕️ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -423,14 +468,14 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             return {
                 match: false,
                 keyTag: ac,
-                reason: `🟡 【ハッシュミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n   ➕️子の計算ハッシュ値: ${calculatedDigest}\n   ➕️親の想定ハッシュ値: ${targetDigest}` };
+                reason: logWarning(`【ハッシュミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n   ➕️子の計算ハッシュ値: ${calculatedDigest}\n   ➕️親の想定ハッシュ値: ${targetDigest}`) };
         }
     }
 
     return { 
         match: false,
         keyTag: ac,
-        reason: `🔴 【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]` 
+        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n   ➕️子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n   ➕️親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
     };
 }
 
@@ -473,7 +518,7 @@ app.post('/api/validate', async (req, res) => {
         if (zoneApexInfo.parentNs !== '') {
             tempLog += `${zoneApexInfo.parentNs} または `;
         }
-        logs.push(`ℹ️ ゾーン頂点は ${zoneApexInfo.zoneApex} 、親候補は ${tempLog}${zoneApexInfo.currentNs} です。`);
+        logs.push(logInfo(`ゾーン頂点は ${zoneApexInfo.zoneApex} 、親候補は ${tempLog}${zoneApexInfo.currentNs} です。`));
 
         // 2. 親サーバーから DSレコードを取得 (エラーハンドリング強化版)
         let targetNs = zoneApexInfo.parentNs;
@@ -486,7 +531,7 @@ app.post('/api/validate', async (req, res) => {
                 dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
             }
         } catch (err) {
-            logs.push(`⚠️ 親サーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
+            logs.push(logWarning(`親サーバー [${targetNs}] へのクエリ失敗: ${err.message}`));
             parentIp = '';
         }
         
@@ -496,7 +541,7 @@ app.post('/api/validate', async (req, res) => {
                 parentIp = await getARecord(targetNs);
                 dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
             } catch (err) {
-                logs.push(`⚠️ 現在のサーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
+                logs.push(logWarning(`現在のサーバー [${targetNs}] へのクエリ失敗: ${err.message}`));
                 parentIp = '';
             }
             
@@ -509,21 +554,21 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'] });
         }
         
-        logs.push(`ℹ️ 親サーバーは ${targetNs} (${parentIp}) で確定しました。`);
+        logs.push(logInfo(`親サーバーは ${targetNs} (${parentIp}) で確定しました。`));
         const dsRecords = dsInfo.resourceRecords;
-        logs.push(`✅ 親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`);
+        logs.push(logSuccess(`親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`));
         const rrsigRecords = dsInfo.rrsigRecords;
         if (rrsigRecords.length === 0) {
-            logs.push('⚠️ 親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。');
+            logs.push(logWarning('親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。'));
         } else {
-            logs.push(`✅ 親サーバーから DSレコードに対する署名 (RRSIGレコード) を ${rrsigRecords.length} 件、取得しました。`);
+            logs.push(logSuccess(`親サーバーから DSレコードに対する署名 (RRSIGレコード) を ${rrsigRecords.length} 件、取得しました。`));
             for (const rrsig of rrsigRecords) {
                 const expiration = new Date(rrsig.data.expiration * 1000);
                 const inception = new Date(rrsig.data.inception * 1000);
-                logs.push(`   ➕️ typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`);
-                logs.push(`   ➕️ signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`);
-                logs.push(`   ➕️ expiration: ${expiration.toISOString()}, inception: ${inception.toISOString()}`);
-                logs.push(`   ➕️ signature: ${rrsig.data.signature.toString('base64')}`);
+                logs.push(logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`));
+                logs.push(logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`));
+                logs.push(logDetail(`expiration: ${expiration.toISOString()}, inception: ${inception.toISOString()}`));
+                logs.push(logDetail(`signature: ${rrsig.data.signature.toString('base64')}`));
             }
         }
 
@@ -535,9 +580,9 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`] });
         }
         
-        logs.push(`ℹ️ 子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`);
+        logs.push(logInfo(`子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`));
         if (parentIp && parentIp === childIp) {
-            logs.push(`ℹ️ このゾーン頂点は親子同居のようです。`);
+            logs.push(logInfo(`このゾーン頂点は親子同居のようです。`));
         }
         
         let dnskeyInfo = null;
@@ -551,7 +596,7 @@ app.post('/api/validate', async (req, res) => {
         if (dnskeyRecords.length === 0) {
             return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
         }
-        logs.push(`✅ 子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`);
+        logs.push(logSuccess(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
         let matchFound = false;
@@ -565,15 +610,15 @@ app.post('/api/validate', async (req, res) => {
 
         if (matchFound) {
             success = true;
-            logs.push('🎉 検証成功: 親の DS と子の DNSKEY が正しく紐付いています！');
+            logs.push(logComplete('検証成功: 親の DS と子の DNSKEY が正しく紐付いています！'));
         } else {
-            logs.push('❌ 検証失敗: 一致する鍵の組み合わせが見つかりませんでした。信頼の連鎖が切れています。');
+            logs.push(logError('検証失敗: 一致する鍵の組み合わせが見つかりませんでした。信頼の連鎖が切れています。'));
         }
 
         res.json({ success, logs });
 
     } catch (err) {
-        const errorMsg = `🔴 予期しないエラーが発生しました: ${err.message}`;
+        const errorMsg = logCritical(`予期しないエラーが発生しました: ${err.message}`);
         logs.push(errorMsg);
         res.status(500).json({ error: errorMsg, logs });
     }
