@@ -415,11 +415,11 @@ function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, alg
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`RSA署名検証成功 (アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
-                logError(`RSA署名検証失敗`)
+                logSuccess(`RSA署名検証に成功しました。 (アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
+                logError(`RSA署名検証に失敗しました。`)
         };
     } catch (err) {
-        return { verified: false, reason: logError(`RSA署名検証エラー: ${err.message}`) };
+        return { verified: false, reason: logError(`RSA署名検証でエラーが発生しました。: ${err.message}`) };
     }
 }
 
@@ -461,11 +461,11 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`ECDSA署名検証成功 (アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
-                logError(`ECDSA署名検証失敗`)
+                logSuccess(`ECDSA署名検証に成功しました。 (アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
+                logError(`ECDSA署名検証に失敗しました。`)
         };
     } catch (err) {
-        return { verified: false, reason: logError(`ECDSA署名検証エラー: ${err.message}`) };
+        return { verified: false, reason: logError(`ECDSA署名検証でエラーが発生しました。: ${err.message}`) };
     }
 }
 
@@ -496,11 +496,11 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`EdDSA署名検証成功 (アルゴリズム: ${crvName.toUpperCase()})`) :
-                logError(`EdDSA署名検証失敗`)
+                logSuccess(`EdDSA署名検証に成功しました。 (アルゴリズム: ${crvName.toUpperCase()})`) :
+                logError(`EdDSA署名検証に失敗しました。`)
         };
     } catch (err) {
-        return { verified: false, reason: logError(`EdDSA署名検証エラー: ${err.message}`) };
+        return { verified: false, reason: logError(`EdDSA署名検証でエラーが発生しました。: ${err.message}`) };
     }
 }
 
@@ -867,12 +867,12 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (signatureVerified) {
-                logs.push(logSuccess('DNSKEY レコード署名検証成功'));
+                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。'));
             } else {
-                logs.push(logWarning('DNSKEY レコード署名検証失敗 - ただし信頼の連鎖検証は続行します'));
+                logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
         } else {
-            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりません'));
+            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりませんでした。'));
         }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
