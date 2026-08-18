@@ -694,7 +694,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
                 warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n➕️ 子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n➕️ ハッシュ値: ${calculatedDigest}`);
+            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n➕️ ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -710,7 +710,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     return { 
         match: false,
         keyTag: ac,
-        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️ 子ゾーンの鍵 [${isKsk} / Key Tag: ${ac} (${keyAlgoName})]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
+        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
     };
 }
 
