@@ -973,16 +973,29 @@ app.get('/', (req, res) => {
         </div>
 
         <script>
+            const domainInput = document.getElementById('domain');
+            const savedDomainKey = 'dnssec-validator-domain';
             const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams) {
-                document.getElementById('domain').value = urlParams.get('domain');
+            const domainFromUrl = urlParams.get('domain');
+
+            try {
+                domainInput.value = domainFromUrl || localStorage.getItem(savedDomainKey) || '';
+            } catch (e) {
+                domainInput.value = domainFromUrl || '';
             }
+
+            domainInput.addEventListener('input', () => {
+                try {
+                    localStorage.setItem(savedDomainKey, domainInput.value);
+                } catch (e) {
+                }
+            });
 
             async function validate(event) {
                 // 画面が勝手にリロード（ページ遷移）するのを防ぐ
                 event.preventDefault();
 
-                let domain = document.getElementById('domain').value.trim();
+                let domain = domainInput.value.trim();
                 const statusBox = document.getElementById('statusBox');
                 const logTitle = document.getElementById('logTitle');
                 const resLogs = document.getElementById('resultLogs');
