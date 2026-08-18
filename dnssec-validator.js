@@ -917,10 +917,22 @@ app.get('/', (req, res) => {
             .card { max-width: 800px; margin: 0 auto; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
             .form-group { margin-bottom: 20px; }
             label { display: block; margin-bottom: 5px; font-weight: bold; color: #34495e; }
-            input[type="text"] { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 14px; }
+            .input-row { display: flex; align-items: center; gap: 10px; }
+            input[type="text"] { flex: 1; min-width: 0; padding: 10px; box-sizing: border-box; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 14px; }
             input[type="text"]:focus { border-color: #3498db; outline: none; }
-            button { background: #007bff; color: white; border: none; padding: 8px 25px; margin-bottom: 20px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
+            button { background: #007bff; color: white; border: none; padding: 8px 25px; margin-bottom: 0; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; white-space: nowrap; }
             button:hover { background: #0056b3; }
+
+            @media (max-width: 560px) {
+                .input-row {
+                    flex-direction: column;
+                    align-items: stretch;
+                }
+
+                button {
+                    width: 100%;
+                }
+            }
 
             /* 説明表示用の枠スタイル */
             .explanation-title { font-weight: bold; margin-bottom: 5px; color: #7f8c8d; }
@@ -948,10 +960,11 @@ app.get('/', (req, res) => {
             <form id="validateForm" onsubmit="validate(event)">
               <div class="form-group">
                 <label>検証するドメイン名</label>
-                <input type="text" id="domain" placeholder="example.com" autofocus>
+                <div class="input-row">
+                  <input type="text" id="domain" placeholder="example.com" autofocus>
+                  <button type="submit">検証スタート</button>
+                </div>
               </div>
-              <!-- ボタンのtypeをsubmitに変更 -->
-              <button type="submit">検証スタート</button>
             </form>
 
             <!-- 説明の枠 -->
