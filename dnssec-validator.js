@@ -792,6 +792,9 @@ app.post('/api/validate', async (req, res) => {
         logs.push(logInfo(`親サーバーは ${targetNs} (${parentIp}) で確定しました。`));
         const dsRecords = dsInfo.resourceRecords;
         logs.push(logSuccess(`親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`));
+        for (const ds of dsRecords) {
+            logs.push(logDetail(`keyTag: ${ds.data.keyTag}, algorithm: ${ds.data.algorithm}, digestType: ${ds.data.digestType}, digest: ${ds.data.digest.toString('hex')}`));
+        }
         const rrsigRecords = dsInfo.rrsigRecords;
         if (rrsigRecords.length === 0) {
             logs.push(logWarning('親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。'));
