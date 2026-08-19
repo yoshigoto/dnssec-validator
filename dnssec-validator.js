@@ -415,7 +415,7 @@ function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, alg
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`RSA署名検証に成功しました。 (アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
+                logSuccess(`RSA署名検証に成功しました。(アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
                 logError(`RSA署名検証に失敗しました。`)
         };
     } catch (err) {
@@ -461,7 +461,7 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`ECDSA署名検証に成功しました。 (アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
+                logSuccess(`ECDSA署名検証に成功しました。(アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
                 logError(`ECDSA署名検証に失敗しました。`)
         };
     } catch (err) {
@@ -496,7 +496,7 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`EdDSA署名検証に成功しました。 (アルゴリズム: ${crvName.toUpperCase()})`) :
+                logSuccess(`EdDSA署名検証に成功しました。(アルゴリズム: ${crvName.toUpperCase()})`) :
                 logError(`EdDSA署名検証に失敗しました。`)
         };
     } catch (err) {
@@ -534,8 +534,7 @@ function buildDnskeyFullRdata(dnskeyData) {
 function summarizeDnskeyRecord(dnskey) {
     const keyTag = calculateKeyTag(dnskey.data.algorithm, buildDnskeyFullRdata(dnskey.data));
     return [
-        logDetail(`flags: ${dnskey.data.flags}, protocol: 3, algorithm: ${dnskey.data.algorithm}, keyTag: ${keyTag}`),
-        logDetail(`publicKey: ${dnskey.data.key.toString('base64')}`)
+        logDetail(`keyTag: ${keyTag}, flags: ${dnskey.data.flags}, protocol: 3, algorithm: ${dnskey.data.algorithm}, publicKey: ${getDnskeyRawKey(dnskey.data).toString('base64')}`)
     ];
 }
 
@@ -543,17 +542,8 @@ function summarizeRrsigRecord(rrsig) {
     const expiration = new Date(rrsig.data.expiration * 1000).toISOString();
     const inception = new Date(rrsig.data.inception * 1000).toISOString();
     return [
-        logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`),
-        logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`),
-        logDetail(`expiration: ${expiration}, inception: ${inception}`),
-        logDetail(`signature: ${rrsig.data.signature.toString('base64')}`)
+        logDetail(`keyTag: ${rrsig.data.keyTag}, typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}, signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, expiration: ${expiration}, inception: ${inception}, signature: ${rrsig.data.signature.toString('base64')}`)
     ];
-}
-
-function summarizeSelectedDnskey(key, rrsig, signerName) {
-    const keyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
-    const matched = key.data.algorithm === rrsig.data.algorithm && keyTag === rrsig.data.keyTag;
-    return logInfo(`署名検証候補: signer=${signerName}, flags=${key.data.flags}, algorithm=${key.data.algorithm}, keyTag=${keyTag}, matched=${matched}`);
 }
 
 // --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
@@ -913,6 +903,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             let dsSignatureVerified = false;
+            let verifiedKeyTag = null;
             for (const rrsig of rrsigRecords) {
                 const signerName = rrsig.data.signersName || zoneApexInfo.zoneApex;
                 try {
@@ -921,7 +912,6 @@ app.post('/api/validate', async (req, res) => {
                     logs.push(logSuccess(`親サーバーから DNSKEY レコードを ${parentDnskeyRecords.length} 件、取得しました。`));
                     for (const key of parentDnskeyRecords) {    // 先に署名検証候補の DNSKEY をログに出力
                         logs.push(...summarizeDnskeyRecord(key));
-                        logs.push(summarizeSelectedDnskey(key, rrsig, signerName));
                     }
                     for (const key of parentDnskeyRecords) {
                         const keyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
@@ -930,6 +920,7 @@ app.post('/api/validate', async (req, res) => {
                             logs.push(signatureResult.reason);
                             if (signatureResult.verified) {
                                 dsSignatureVerified = true;
+                                verifiedKeyTag = keyTag;
                             }
                         }
                     }
@@ -939,7 +930,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified) {
-                logs.push(logSuccess('DSレコード署名検証に成功しました。'));
+                logs.push(logSuccess('DSレコード署名検証に成功しました。(KeyTag: ' + verifiedKeyTag + ')'));
             } else {
                 logs.push(logWarning('DSレコード署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
             }
@@ -985,7 +976,7 @@ app.post('/api/validate', async (req, res) => {
             // DNSKEY レコード署名を検証（自己署名KSKで検証）
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
-            
+            let verifiedKeyTag = null;
             for (const rrsig of dnskeyRrsig) {
                 for (const ksk of kskRecords) {
                     // DNSKEYレコードから Key Tag を計算
@@ -995,13 +986,14 @@ app.post('/api/validate', async (req, res) => {
                         logs.push(signatureResult.reason);
                         if (signatureResult.verified) {
                             signatureVerified = true;
+                            verifiedKeyTag = calculatedKeyTag;
                         }
                     }
                 }
             }
             
             if (signatureVerified) {
-                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。'));
+                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(KeyTag: ' + verifiedKeyTag + ')'));
             } else {
                 logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
