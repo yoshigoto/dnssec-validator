@@ -792,7 +792,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
                 warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = logSuccess(`【一致】Key Tag ${ac} (${keyAlgoName}) とハッシュが両方とも一致しました。\n➕️ ハッシュ値: ${calculatedDigest}`);
+            const successMsg = logSuccess(`【一致】Key Tag ${ac} (${keyAlgoName}) とハッシュ値が両方とも一致する鍵が見つかりました。\n➕️ ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -801,7 +801,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             return {
                 match: false,
                 keyTag: ac,
-                reason: logWarning(`【ハッシュミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n➕️ 子の計算ハッシュ値: ${calculatedDigest}\n➕️ 親の想定ハッシュ値: ${targetDigest}`) };
+                reason: logWarning(`【ハッシュ値ミスマッチ】Key Tag [${ac}] は一致しますが、Digestが異なります。\n➕️ 子の計算ハッシュ値: ${calculatedDigest}\n➕️ 親の想定ハッシュ値: ${targetDigest}`) };
         }
     }
 
