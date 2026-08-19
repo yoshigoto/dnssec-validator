@@ -531,6 +531,31 @@ function buildDnskeyFullRdata(dnskeyData) {
     return Buffer.concat([headerBuf, getDnskeyRawKey(dnskeyData)]);
 }
 
+function summarizeDnskeyRecord(dnskey) {
+    const keyTag = calculateKeyTag(dnskey.data.algorithm, buildDnskeyFullRdata(dnskey.data));
+    return [
+        logDetail(`flags: ${dnskey.data.flags}, protocol: 3, algorithm: ${dnskey.data.algorithm}, keyTag: ${keyTag}`),
+        logDetail(`publicKey: ${dnskey.data.key.toString('base64')}`)
+    ];
+}
+
+function summarizeRrsigRecord(rrsig) {
+    const expiration = new Date(rrsig.data.expiration * 1000).toISOString();
+    const inception = new Date(rrsig.data.inception * 1000).toISOString();
+    return [
+        logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`),
+        logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`),
+        logDetail(`expiration: ${expiration}, inception: ${inception}`),
+        logDetail(`signature: ${rrsig.data.signature.toString('base64')}`)
+    ];
+}
+
+function summarizeSelectedDnskey(key, rrsig, signerName) {
+    const keyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
+    const matched = key.data.algorithm === rrsig.data.algorithm && keyTag === rrsig.data.keyTag;
+    return logInfo(`署名検証候補: signer=${signerName}, flags=${key.data.flags}, algorithm=${key.data.algorithm}, keyTag=${keyTag}, matched=${matched}`);
+}
+
 // --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
 // rrset: 同じ Type Covered を持つ全リソースレコードの配列（RFC 4034 の署名対象RRset）
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
@@ -883,13 +908,8 @@ app.post('/api/validate', async (req, res) => {
             logs.push(logWarning('親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。'));
         } else {
             logs.push(logSuccess(`親サーバーから DSレコードに対する署名 (RRSIGレコード) を ${rrsigRecords.length} 件、取得しました。`));
-            for (const rrsig of rrsigRecords) {
-                const expiration = new Date(rrsig.data.expiration * 1000);
-                const inception = new Date(rrsig.data.inception * 1000);
-                logs.push(logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`));
-                logs.push(logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`));
-                logs.push(logDetail(`expiration: ${expiration.toISOString()}, inception: ${inception.toISOString()}`));
-                logs.push(logDetail(`signature: ${rrsig.data.signature.toString('base64')}`));
+            for (const rrsig of rrsigRecords) { // 先に署名検証候補の RRSIG をログに出力
+                logs.push(...summarizeRrsigRecord(rrsig));
             }
 
             let dsSignatureVerified = false;
@@ -898,6 +918,11 @@ app.post('/api/validate', async (req, res) => {
                 try {
                     const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
                     const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
+                    logs.push(logSuccess(`親サーバーから DNSKEY レコードを ${parentDnskeyRecords.length} 件、取得しました。`));
+                    for (const key of parentDnskeyRecords) {    // 先に署名検証候補の DNSKEY をログに出力
+                        logs.push(...summarizeDnskeyRecord(key));
+                        logs.push(summarizeSelectedDnskey(key, rrsig, signerName));
+                    }
                     for (const key of parentDnskeyRecords) {
                         const keyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
                         if (key.data.algorithm === rrsig.data.algorithm && keyTag === rrsig.data.keyTag) {
@@ -946,8 +971,7 @@ app.post('/api/validate', async (req, res) => {
         }
         logs.push(logSuccess(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
         for (const dnskey of dnskeyRecords) {
-            logs.push(logDetail(`flags: ${dnskey.data.flags}, protocol: 3, algorithm: ${dnskey.data.algorithm}, keyTag: ${calculateKeyTag(dnskey.data.algorithm, buildDnskeyFullRdata(dnskey.data))}`));
-            logs.push(logDetail(`publicKey: ${dnskey.data.key.toString('base64')}`));
+            logs.push(...summarizeDnskeyRecord(dnskey));
         }
         
         // 3.5. DNSKEY レコード署名検証（オプション）
@@ -955,10 +979,7 @@ app.post('/api/validate', async (req, res) => {
         if (dnskeyRrsig.length > 0) {
             logs.push(logSuccess(`DNSKEY レコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
             for (const rrsig of dnskeyRrsig) {
-                logs.push(logDetail(`typeCovered: ${rrsig.data.typeCovered}, algorithm: ${rrsig.data.algorithm}, labels: ${rrsig.data.labels}`));
-                logs.push(logDetail(`signersName: ${rrsig.data.signersName}, originalTTL: ${rrsig.data.originalTTL}, keyTag: ${rrsig.data.keyTag}`));
-                logs.push(logDetail(`expiration: ${new Date(rrsig.data.expiration * 1000).toISOString()}, inception: ${new Date(rrsig.data.inception * 1000).toISOString()}`));
-                logs.push(logDetail(`signature: ${rrsig.data.signature.toString('base64')}`));
+                logs.push(...summarizeRrsigRecord(rrsig));
             }
             
             // DNSKEY レコード署名を検証（自己署名KSKで検証）
