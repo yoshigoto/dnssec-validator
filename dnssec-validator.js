@@ -415,7 +415,7 @@ function verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, alg
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`RSA署名検証に成功しました。(アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
+                logInfo(`RSA署名検証に成功しました。(アルゴリズム: RSASHA${keyType === 'sha1' ? '1' : keyType.slice(-3)})`) :
                 logError(`RSA署名検証に失敗しました。`)
         };
     } catch (err) {
@@ -461,7 +461,7 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`ECDSA署名検証に成功しました。(アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
+                logInfo(`ECDSA署名検証に成功しました。(アルゴリズム: ECDSAP${algorithm === 13 ? '256SHA256' : '384SHA384'})`) :
                 logError(`ECDSA署名検証に失敗しました。`)
         };
     } catch (err) {
@@ -496,7 +496,7 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         return { 
             verified, 
             reason: verified ? 
-                logSuccess(`EdDSA署名検証に成功しました。(アルゴリズム: ${crvName.toUpperCase()})`) :
+                logInfo(`EdDSA署名検証に成功しました。(アルゴリズム: ${crvName.toUpperCase()})`) :
                 logError(`EdDSA署名検証に失敗しました。`)
         };
     } catch (err) {
