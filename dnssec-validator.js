@@ -239,17 +239,17 @@ async function getARecord(domain) {
             if (nsAuthRecord) {
                 currentNs = nsAuthRecord.data;
             } else {
-                throw new Error(`${currentNs} から A レコードの委任情報が得られません`);
+                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
             }
         } catch (err) {
             if (i === MAX_RECURSION_DEPTH - 1) {
-                throw new Error(`A レコード取得失敗 [${domain}]: ${err.message}`);
+                throw new Error(`Aレコード取得失敗 [${domain}]: ${err.message}`);
             }
         }
     }
     
     if (!ipAddress) {
-        throw new Error(`A レコード取得失敗 [${domain}]: ${MAX_RECURSION_DEPTH} 回の再帰でも IP アドレスが見つかりません`);
+        throw new Error(`Aレコード取得失敗 [${domain}]: ${MAX_RECURSION_DEPTH} 回の再帰でも IP アドレスが見つかりません`);
     }
     
     return ipAddress;
@@ -517,7 +517,7 @@ function encodeDomainNameCanonical(domain) {
     return Buffer.concat([buf, Buffer.from([0x00])]);
 }
 
-// --- ヘルパー関数: DNSKEY レコードから公開鍵バイト列を取得 ---
+// --- ヘルパー関数: DNSKEYレコードから公開鍵バイト列を取得 ---
 function getDnskeyRawKey(dnskeyData) {
     return dnskeyData.key || dnskeyData.publicKey;
 }
@@ -792,7 +792,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
                 warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = logSuccess(`【一致】Key Tag [${ac} (${keyAlgoName}) / ${isKsk}] とハッシュが完全に一致しました。\n➕️ ハッシュ値: ${calculatedDigest}`);
+            const successMsg = logSuccess(`【一致】Key Tag ${ac} (${keyAlgoName}) とハッシュが両方とも一致しました。\n➕️ ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -909,7 +909,7 @@ app.post('/api/validate', async (req, res) => {
                 try {
                     const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
                     const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
-                    logs.push(logSuccess(`親サーバーから DNSKEY レコードを ${parentDnskeyRecords.length} 件、取得しました。`));
+                    logs.push(logSuccess(`親サーバーから DNSKEYレコードを ${parentDnskeyRecords.length} 件、取得しました。`));
                     for (const key of parentDnskeyRecords) {    // 先に署名検証候補の DNSKEY をログに出力
                         logs.push(...summarizeDnskeyRecord(key));
                     }
@@ -930,9 +930,9 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified) {
-                logs.push(logSuccess('DSレコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
+                logs.push(logSuccess('DSレコードに関する署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
             } else {
-                logs.push(logWarning('DSレコード署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
+                logs.push(logWarning('DSレコードに関する署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
             }
         }
 
@@ -953,7 +953,7 @@ app.post('/api/validate', async (req, res) => {
         try {
             dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEY レコード取得失敗: ${err.message}`] });
+            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEYレコード取得失敗: ${err.message}`] });
         }
         
         const dnskeyRecords = dnskeyInfo.resourceRecords;
@@ -965,15 +965,15 @@ app.post('/api/validate', async (req, res) => {
             logs.push(...summarizeDnskeyRecord(dnskey));
         }
         
-        // 3.5. DNSKEY レコード署名検証（オプション）
+        // 3.5. DNSKEYレコード署名検証（オプション）
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
         if (dnskeyRrsig.length > 0) {
-            logs.push(logSuccess(`DNSKEY レコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
+            logs.push(logSuccess(`DNSKEYレコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
             for (const rrsig of dnskeyRrsig) {
                 logs.push(...summarizeRrsigRecord(rrsig));
             }
             
-            // DNSKEY レコード署名を検証（自己署名KSKで検証）
+            // DNSKEYレコード署名を検証（自己署名KSKで検証）
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
             let verifiedKeyTag = new Array();
@@ -993,18 +993,18 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (signatureVerified) {
-                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
+                logs.push(logSuccess('DNSKEYレコードに関する署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
             } else {
-                logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
+                logs.push(logWarning('DNSKEYレコードに関する署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
         } else {
-            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりませんでした - ただし信頼の連鎖検証を続行します。'));
+            logs.push(logWarning('DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした - ただし信頼の連鎖検証を続行します。'));
         }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
         let matchFound = false;
         let dsKeyTags = dsRecords.map(ds => ds.data.keyTag);
-        logs.push(logInfo(`検証開始: 親の DS レコードの Key Tag: [${dsKeyTags.join(', ')}]`));
+        logs.push(logInfo(`委任状態検証開始: 親の DSレコードの Key Tag: [${dsKeyTags.join(', ')}]`));
         for (const ds of dsRecords) {
             for (const key of dnskeyRecords) {
                 const result = verifyDnskeyWithDs(zoneApexInfo.zoneApex, key.data, ds.data);
