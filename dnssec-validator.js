@@ -808,7 +808,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     return { 
         match: false,
         keyTag: ac,
-        reason: logError(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
+        reason: logInfo(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
     };
 }
 
