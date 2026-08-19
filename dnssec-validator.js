@@ -903,7 +903,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             let dsSignatureVerified = false;
-            let verifiedKeyTag = null;
+            let verifiedKeyTag = new Array();
             for (const rrsig of rrsigRecords) {
                 const signerName = rrsig.data.signersName || zoneApexInfo.zoneApex;
                 try {
@@ -920,7 +920,7 @@ app.post('/api/validate', async (req, res) => {
                             logs.push(signatureResult.reason);
                             if (signatureResult.verified) {
                                 dsSignatureVerified = true;
-                                verifiedKeyTag = keyTag;
+                                verifiedKeyTag.push(keyTag);
                             }
                         }
                     }
@@ -930,7 +930,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified) {
-                logs.push(logSuccess('DSレコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag + ')'));
+                logs.push(logSuccess('DSレコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
             } else {
                 logs.push(logWarning('DSレコード署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
             }
@@ -976,7 +976,7 @@ app.post('/api/validate', async (req, res) => {
             // DNSKEY レコード署名を検証（自己署名KSKで検証）
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
-            let verifiedKeyTag = null;
+            let verifiedKeyTag = new Array();
             for (const rrsig of dnskeyRrsig) {
                 for (const ksk of kskRecords) {
                     // DNSKEYレコードから Key Tag を計算
@@ -986,14 +986,14 @@ app.post('/api/validate', async (req, res) => {
                         logs.push(signatureResult.reason);
                         if (signatureResult.verified) {
                             signatureVerified = true;
-                            verifiedKeyTag = calculatedKeyTag;
+                            verifiedKeyTag.push(calculatedKeyTag);
                         }
                     }
                 }
             }
             
             if (signatureVerified) {
-                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag + ')'));
+                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag.join(', ') + ')'));
             } else {
                 logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
