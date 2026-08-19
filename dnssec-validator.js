@@ -930,7 +930,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified) {
-                logs.push(logSuccess('DSレコード署名検証に成功しました。(KeyTag: ' + verifiedKeyTag + ')'));
+                logs.push(logSuccess('DSレコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag + ')'));
             } else {
                 logs.push(logWarning('DSレコード署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
             }
@@ -993,7 +993,7 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (signatureVerified) {
-                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(KeyTag: ' + verifiedKeyTag + ')'));
+                logs.push(logSuccess('DNSKEY レコード署名検証に成功しました。(Key Tag: ' + verifiedKeyTag + ')'));
             } else {
                 logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
