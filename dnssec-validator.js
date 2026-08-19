@@ -623,6 +623,89 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     return signatureResult;
 }
 
+function buildDsRdata(dsRecord) {
+    const digest = Buffer.isBuffer(dsRecord.digest) ? dsRecord.digest : Buffer.from(dsRecord.digest || []);
+    const rdata = Buffer.alloc(4 + digest.length);
+    rdata.writeUInt16BE(dsRecord.keyTag, 0);
+    rdata.writeUInt8(dsRecord.algorithm, 2);
+    rdata.writeUInt8(dsRecord.digestType, 3);
+    digest.copy(rdata, 4);
+    return rdata;
+}
+
+function verifyDSSignature(dsRecords, rrsig, dnskeyRecord, zoneName) {
+    const expirationCheck = checkSignatureExpiration(rrsig);
+    if (!expirationCheck.valid) {
+        return { verified: false, reason: expirationCheck.reason };
+    }
+
+    const fullRdata = buildDnskeyFullRdata(dnskeyRecord.data);
+    const calculatedKeyTag = calculateKeyTag(dnskeyRecord.data.algorithm, fullRdata);
+    if (calculatedKeyTag !== rrsig.data.keyTag) {
+        return {
+            verified: false,
+            reason: logWarning(`DS RRSIG Key Tag不一致: DNSKEY [${calculatedKeyTag}] vs RRSIG [${rrsig.data.keyTag}]`)
+        };
+    }
+
+    if (dnskeyRecord.data.algorithm !== rrsig.data.algorithm) {
+        return {
+            verified: false,
+            reason: logError(`DS RRSIG アルゴリズム不一致: DNSKEY [${dnskeyRecord.data.algorithm}] vs RRSIG [${rrsig.data.algorithm}]`)
+        };
+    }
+
+    const signerNameBuf = encodeDomainNameCanonical(rrsig.data.signersName || zoneName);
+    const rrsigRdataHeader = Buffer.alloc(18);
+    rrsigRdataHeader.writeUInt16BE(dnsTypes.toType(rrsig.data.typeCovered), 0);
+    rrsigRdataHeader.writeUInt8(rrsig.data.algorithm, 2);
+    rrsigRdataHeader.writeUInt8(rrsig.data.labels, 3);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.expiration, 8);
+    rrsigRdataHeader.writeUInt32BE(rrsig.data.inception, 12);
+    rrsigRdataHeader.writeUInt16BE(rrsig.data.keyTag, 16);
+
+    const ownerNameBuf = encodeDomainNameCanonical(zoneName);
+    const typeCoveredNum = dnsTypes.toType(rrsig.data.typeCovered);
+    const rrWireBufs = (dsRecords || [])
+        .map(record => {
+            const rdata = buildDsRdata(record.data);
+            const rrHeader = Buffer.alloc(10);
+            rrHeader.writeUInt16BE(typeCoveredNum, 0);
+            rrHeader.writeUInt16BE(1, 2);
+            rrHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+            rrHeader.writeUInt16BE(rdata.length, 8);
+            return Buffer.concat([ownerNameBuf, rrHeader, rdata]);
+        })
+        .sort(Buffer.compare);
+
+    const messageBuffer = Buffer.concat([rrsigRdataHeader, signerNameBuf, ...rrWireBufs]);
+    const signatureBuffer = rrsig.data.signature;
+    if (!signatureBuffer) {
+        return { verified: false, reason: logError('DS RRSIG から署名データを抽出できません') };
+    }
+
+    const publicKeyBuffer = getDnskeyRawKey(dnskeyRecord.data);
+    if (!publicKeyBuffer) {
+        return { verified: false, reason: logError('親 DNSKEY から公開鍵を抽出できません') };
+    }
+
+    const algorithm = dnskeyRecord.data.algorithm;
+    let signatureResult;
+
+    if (algorithm === 5 || algorithm === 7 || algorithm === 8 || algorithm === 10) {
+        signatureResult = verifyRSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 13 || algorithm === 14) {
+        signatureResult = verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 15 || algorithm === 16) {
+        signatureResult = verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else {
+        return { verified: false, reason: logError(`未対応の暗号アルゴリズム [${algorithm}]`) };
+    }
+
+    return signatureResult;
+}
+
 // --- ヘルパー関数: アルゴリズムごとの特性を考慮した正確な Key Tag 計算 ---
 function calculateKeyTag(algorithm, fullRdata) {
     // 1. アルゴリズム 1 (RSAMD5) の場合
@@ -808,6 +891,33 @@ app.post('/api/validate', async (req, res) => {
                 logs.push(logDetail(`expiration: ${expiration.toISOString()}, inception: ${inception.toISOString()}`));
                 logs.push(logDetail(`signature: ${rrsig.data.signature.toString('base64')}`));
             }
+
+            let dsSignatureVerified = false;
+            for (const rrsig of rrsigRecords) {
+                const signerName = rrsig.data.signersName || zoneApexInfo.zoneApex;
+                try {
+                    const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
+                    const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
+                    for (const key of parentDnskeyRecords) {
+                        const keyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
+                        if (key.data.algorithm === rrsig.data.algorithm && keyTag === rrsig.data.keyTag) {
+                            const signatureResult = verifyDSSignature(dsRecords, rrsig, key, zoneApexInfo.zoneApex);
+                            logs.push(signatureResult.reason);
+                            if (signatureResult.verified) {
+                                dsSignatureVerified = true;
+                            }
+                        }
+                    }
+                } catch (err) {
+                    logs.push(logWarning(`DS RRSIG 検証用の親 DNSKEY 取得失敗 [${signerName}]: ${err.message}`));
+                }
+            }
+
+            if (dsSignatureVerified) {
+                logs.push(logSuccess('DSレコード署名検証に成功しました。'));
+            } else {
+                logs.push(logWarning('DSレコード署名検証に失敗しました - 親 DNSKEY と照合できませんでした。'));
+            }
         }
 
         // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得 (エラーハンドリング強化版)
@@ -875,7 +985,7 @@ app.post('/api/validate', async (req, res) => {
                 logs.push(logWarning('DNSKEY レコード署名検証に失敗しました - ただし信頼の連鎖検証は続行します。'));
             }
         } else {
-            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりませんでした。'));
+            logs.push(logWarning('DNSKEY レコードに対する署名 (RRSIG) が見つかりませんでした - ただし信頼の連鎖検証を続行します。'));
         }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
