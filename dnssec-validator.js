@@ -887,9 +887,9 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'] });
         }
         
-        logs.push(logInfo(`親サーバーは ${targetNs} (${parentIp}) で確定しました。`));
+        logs.push(logSuccess(`親サーバーは ${targetNs} (${parentIp}) で確定しました。`));
         const dsRecords = dsInfo.resourceRecords;
-        logs.push(logSuccess(`親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`));
+        logs.push(logInfo(`親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`));
         for (const ds of dsRecords) {
             logs.push(logDetail(`keyTag: ${ds.data.keyTag}, algorithm: ${ds.data.algorithm}, digestType: ${ds.data.digestType}, digest: ${ds.data.digest.toString('hex')}`));
         }
@@ -897,7 +897,7 @@ app.post('/api/validate', async (req, res) => {
         if (rrsigRecords.length === 0) {
             logs.push(logWarning('親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。'));
         } else {
-            logs.push(logSuccess(`親サーバーから DSレコードに対する署名 (RRSIGレコード) を ${rrsigRecords.length} 件、取得しました。`));
+            logs.push(logInfo(`親サーバーから DSレコードに対する署名 (RRSIGレコード) を ${rrsigRecords.length} 件、取得しました。`));
             for (const rrsig of rrsigRecords) { // 先に署名検証候補の RRSIG をログに出力
                 logs.push(...summarizeRrsigRecord(rrsig));
             }
@@ -909,7 +909,7 @@ app.post('/api/validate', async (req, res) => {
                 try {
                     const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
                     const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
-                    logs.push(logSuccess(`親サーバーから DNSKEYレコードを ${parentDnskeyRecords.length} 件、取得しました。`));
+                    logs.push(logInfo(`親サーバーから DNSKEYレコードを ${parentDnskeyRecords.length} 件、取得しました。`));
                     for (const key of parentDnskeyRecords) {    // 先に署名検証候補の DNSKEY をログに出力
                         logs.push(...summarizeDnskeyRecord(key));
                     }
@@ -944,7 +944,7 @@ app.post('/api/validate', async (req, res) => {
             return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`] });
         }
         
-        logs.push(logInfo(`子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`));
+        logs.push(logSuccess(`子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`));
         if (parentIp && parentIp === childIp) {
             logs.push(logInfo(`このゾーン頂点は親子同居のようです。`));
         }
@@ -960,7 +960,7 @@ app.post('/api/validate', async (req, res) => {
         if (dnskeyRecords.length === 0) {
             return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
         }
-        logs.push(logSuccess(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
+        logs.push(logInfo(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
         for (const dnskey of dnskeyRecords) {
             logs.push(...summarizeDnskeyRecord(dnskey));
         }
@@ -968,7 +968,7 @@ app.post('/api/validate', async (req, res) => {
         // 3.5. DNSKEYレコード署名検証（オプション）
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
         if (dnskeyRrsig.length > 0) {
-            logs.push(logSuccess(`DNSKEYレコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
+            logs.push(logInfo(`子サーバーから DNSKEYレコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
             for (const rrsig of dnskeyRrsig) {
                 logs.push(...summarizeRrsigRecord(rrsig));
             }
