@@ -792,7 +792,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             if ((dnskeyData.algorithm === 13 || dnskeyData.algorithm === 15) && dsRecord.digestType === 1) {
                 warnings.push(logWarning(`【強度ミスマッチ】子の鍵は強力な ${keyAlgoName} ですが、親のDSハッシュが古い ${dsDigestName} です。`));
             }
-            const successMsg = logSuccess(`【一致】Key Tag [${ac}] とハッシュが完全に一致しました。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]\n➕️ ハッシュ値: ${calculatedDigest}`);
+            const successMsg = logSuccess(`【一致】Key Tag [${ac} (${keyAlgoName}) / ${isKsk}] とハッシュが完全に一致しました。\n➕️ ハッシュ値: ${calculatedDigest}`);
             return { 
                 match: true,
                 keyTag: ac,
@@ -808,7 +808,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     return { 
         match: false,
         keyTag: ac,
-        reason: logInfo(`【スキップ】子ゾーンの鍵は、親の指定する鍵とは異なります。\n➕️ 子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}]\n➕️ 親の指定する鍵 [Key Tag: ${dsRecord.keyTag}]`) 
+        reason: logInfo(`【スキップ】子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}] は、親の指定する鍵とは異なります。`)
     };
 }
 
@@ -1003,6 +1003,8 @@ app.post('/api/validate', async (req, res) => {
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
         let matchFound = false;
+        let dsKeyTags = dsRecords.map(ds => ds.data.keyTag);
+        logs.push(logInfo(`検証開始: 親の DS レコードの Key Tag: [${dsKeyTags.join(', ')}]`));
         for (const ds of dsRecords) {
             for (const key of dnskeyRecords) {
                 const result = verifyDnskeyWithDs(zoneApexInfo.zoneApex, key.data, ds.data);
