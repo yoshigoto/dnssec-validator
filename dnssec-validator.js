@@ -742,7 +742,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     return { 
         match: false,
         keyTag: ac,
-        reason: `子ゾーンの鍵 [Key Tag: ${ac} (${keyAlgoName}) / ${isKsk}] は、親の指定する鍵とは異なります。`
+        reason: ''
     };
 }
 
@@ -876,7 +876,9 @@ app.post('/api/validate', async (req, res) => {
                                 diagram.checks.dsSignature = true;
                                 verifiedKeyTag.push(keyTag);
                             } else {
-                                logs.push(signatureResult.reason);
+                                if (signatureResult.reason && signatureResult.reason !== '') {
+                                    logs.push(signatureResult.reason);
+                                }
                             }
                         }
                     }
@@ -888,7 +890,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified !== true) {
-                logs.push(`DSレコードに関する署名検証に失敗しました - 親 DNSKEY と照合できませんでした。`);
+                logs.push(`DSレコードに関する署名検証に失敗しました。`);
             }
         }
 
@@ -947,7 +949,9 @@ app.post('/api/validate', async (req, res) => {
                             diagram.checks.dnskeySignature = true;
                             verifiedKeyTag.push(calculatedKeyTag);
                         } else {
-                            logs.push(signatureResult.reason);
+                            if (signatureResult.reason && signatureResult.reason !== '') {
+                                logs.push(signatureResult.reason);
+                            }
                         }
                     }
                 }
@@ -955,10 +959,10 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (signatureVerified !== true) {
-                logs.push(`DNSKEYレコードに関する署名検証に失敗しました - ただし信頼の連鎖検証は続行します。`);
+                logs.push(`DNSKEYレコードに関する署名検証に失敗しました。`);
             }
         } else {
-            logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした - ただし信頼の連鎖検証を続行します。`);
+            logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
         }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
@@ -970,7 +974,9 @@ app.post('/api/validate', async (req, res) => {
                 if (result.match) {
                     matchFound = true;
                 } else {
-                    logs.push(result.reason);
+                    if (result.reason && result.reason !== '') {
+                        logs.push(result.reason);
+                    }
                 }
             }
         }
@@ -979,6 +985,8 @@ app.post('/api/validate', async (req, res) => {
 
         if (matchFound) {
             success = true;
+        } else {
+            logs.push(`親ゾーンの DSレコードと子ゾーンの DNSKEYレコードの突合に失敗しました。DNSSEC が正しく委任されていない可能性があります。`);
         }
 
         res.json({ success, logs, diagram });
@@ -1241,6 +1249,10 @@ app.get('/', (req, res) => {
                         if (data.success) {
                             statusBox.className = 'result-status-box status-success';
                             statusBox.innerText = '検証成功: DNSSEC の委任状態は問題ありません！';
+                            if (data.logs && data.logs.length > 0) {
+                                errorDetailsElement.textContent = data.logs.join(String.fromCharCode(10));
+                                errorDetailsElement.style.display = 'block';
+                            }
                         } else {
                             statusBox.className = 'result-status-box status-failed';
                             statusBox.innerText = '検証失敗: 信頼の連鎖が切れています';
