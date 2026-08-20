@@ -1179,7 +1179,7 @@ app.get('/', (req, res) => {
                 document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
                 document.getElementById('parentDs').innerHTML = '<div class="node-title">DS</div><div class="node-meta">' + dsText(diagram.parent.ds) + '<br>※子KSKのハッシュ値</div>';
                 document.getElementById('parentRrsig').innerHTML = '<div class="node-title">RRSIG (DS)</div><div class="node-meta">' + rrsigText(diagram.parent.rrsig) + '<br>※DSを対象とする署名データ</div>';
-                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY (ZSK)</div><div class="node-meta">' + keyText(parentKey, '親ZSK') + '<br>※DSを署名した公開鍵</div>';
+                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY (ZSK)</div><div class="node-meta">' + keyText(parentKey, '親ZSK') + '<br>※DSの署名検証用公開鍵</div>';
                 document.getElementById('childKey').innerHTML = '<div class="node-title">DNSKEY (KSK)</div><div class="node-meta">' + keyText(childKsk, '子KSK') + '<br>※DSのハッシュ対象</div>';
                 document.getElementById('childRrsig').innerHTML = '<div class="node-title">RRSIG (DNSKEY)</div><div class="node-meta">' + rrsigText(diagram.child.rrsig) + '<br>※DNSKEY (KSK)を対象とする署名データ</div>';
                 const chainOk = diagram.checks.dsKeyMatch;
