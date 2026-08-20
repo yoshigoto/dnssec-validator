@@ -836,17 +836,26 @@ app.post('/api/validate', async (req, res) => {
     
     let logs = [];
     let success = false;
+    const diagram = {
+        parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] },
+        child: { name: domain, server: '', dnskey: [], rrsig: [] },
+        checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
+    };
 
     try {
         // 1. ドメイン名からゾーン頂点を取得
         const zoneApexInfo = await getZoneApex(domain);
         if (zoneApexInfo.zoneApex === '') {
             if (zoneApexInfo.cdName) {
-                return res.json({ success: false, logs: [...logs, '⚠️ このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'] });
+                return res.json({ success: false, logs: [...logs, '⚠️ このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
             } else {
-                return res.json({ success: false, logs: [...logs, `⚠️ ${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`] });
+                return res.json({ success: false, logs: [...logs, `⚠️ ${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
             }
         }
+        diagram.parent.name = zoneApexInfo.zoneApex;
+        diagram.parent.server = zoneApexInfo.parentNs || zoneApexInfo.currentNs;
+        diagram.child.name = zoneApexInfo.zoneApex;
+        diagram.child.server = zoneApexInfo.currentNs;
         let tempLog = '';
         if (zoneApexInfo.parentNs !== '') {
             tempLog += `${zoneApexInfo.parentNs} または `;
@@ -857,6 +866,7 @@ app.post('/api/validate', async (req, res) => {
         let targetNs = zoneApexInfo.parentNs;
         let parentIp = '';
         let dsInfo = null;
+        diagram.parent.server = targetNs || zoneApexInfo.currentNs;
         
         try {
             if (targetNs) {
@@ -871,6 +881,7 @@ app.post('/api/validate', async (req, res) => {
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
             try {
                 targetNs = zoneApexInfo.currentNs;
+                diagram.parent.server = targetNs;
                 parentIp = await getARecord(targetNs);
                 dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
             } catch (err) {
@@ -879,21 +890,37 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-                return res.json({ success: false, logs: [...logs, '⚠️ 親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'] });
+                return res.json({ success: false, logs: [...logs, '⚠️ 親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
         
         if (!parentIp) {
-            return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'] });
+            return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'], diagram });
         }
         
         logs.push(logSuccess(`親サーバーは ${targetNs} (${parentIp}) で確定しました。`));
         const dsRecords = dsInfo.resourceRecords;
+        diagram.parent.name = zoneApexInfo.zoneApex;
+        diagram.parent.server = targetNs;
+        diagram.child.name = zoneApexInfo.zoneApex;
+        diagram.child.server = zoneApexInfo.currentNs;
+        diagram.parent.ds = dsRecords.map(ds => ({
+            keyTag: ds.data.keyTag,
+            algorithm: ds.data.algorithm,
+            digestType: ds.data.digestType,
+            digest: ds.data.digest.toString('hex')
+        }));
         logs.push(logInfo(`親サーバーから DSレコードを ${dsRecords.length} 件、取得しました。`));
         for (const ds of dsRecords) {
             logs.push(logDetail(`keyTag: ${ds.data.keyTag}, algorithm: ${ds.data.algorithm}, digestType: ${ds.data.digestType}, digest: ${ds.data.digest.toString('hex')}`));
         }
         const rrsigRecords = dsInfo.rrsigRecords;
+        diagram.parent.rrsig = rrsigRecords.map(rrsig => ({
+            keyTag: rrsig.data.keyTag,
+            typeCovered: rrsig.data.typeCovered,
+            algorithm: rrsig.data.algorithm,
+            verified: null
+        }));
         if (rrsigRecords.length === 0) {
             logs.push(logWarning('親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。'));
         } else {
@@ -904,11 +931,18 @@ app.post('/api/validate', async (req, res) => {
 
             let dsSignatureVerified = false;
             let verifiedKeyTag = new Array();
-            for (const rrsig of rrsigRecords) {
+            for (let rrsigIndex = 0; rrsigIndex < rrsigRecords.length; rrsigIndex++) {
+                const rrsig = rrsigRecords[rrsigIndex];
                 const signerName = rrsig.data.signersName || zoneApexInfo.zoneApex;
+                let rrsigVerified = false;
                 try {
                     const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
                     const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
+                    diagram.parent.dnskey = parentDnskeyRecords.map(key => ({
+                        keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
+                        flags: key.data.flags,
+                        algorithm: key.data.algorithm
+                    }));
                     logs.push(logInfo(`親サーバーから DNSKEYレコードを ${parentDnskeyRecords.length} 件、取得しました。`));
                     for (const key of parentDnskeyRecords) {    // 先に署名検証候補の DNSKEY をログに出力
                         logs.push(...summarizeDnskeyRecord(key));
@@ -918,13 +952,17 @@ app.post('/api/validate', async (req, res) => {
                         if (key.data.algorithm === rrsig.data.algorithm && keyTag === rrsig.data.keyTag) {
                             const signatureResult = verifyDSSignature(dsRecords, rrsig, key, zoneApexInfo.zoneApex);
                             logs.push(signatureResult.reason);
+                            rrsigVerified = signatureResult.verified;
                             if (signatureResult.verified) {
                                 dsSignatureVerified = true;
+                                diagram.checks.dsSignature = true;
                                 verifiedKeyTag.push(keyTag);
                             }
                         }
                     }
+                    diagram.parent.rrsig[rrsigIndex].verified = rrsigVerified;
                 } catch (err) {
+                    diagram.parent.rrsig[rrsigIndex].verified = false;
                     logs.push(logWarning(`DS RRSIG 検証用の親 DNSKEY 取得失敗 [${signerName}]: ${err.message}`));
                 }
             }
@@ -941,10 +979,12 @@ app.post('/api/validate', async (req, res) => {
         try {
             childIp = await getARecord(zoneApexInfo.currentNs);
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`] });
+            return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
         }
         
         logs.push(logSuccess(`子サーバーは ${zoneApexInfo.currentNs} (${childIp}) です。`));
+        diagram.child.name = zoneApexInfo.zoneApex;
+        diagram.child.server = zoneApexInfo.currentNs;
         if (parentIp && parentIp === childIp) {
             logs.push(logInfo(`このゾーン頂点は親子同居のようです。`));
         }
@@ -953,20 +993,31 @@ app.post('/api/validate', async (req, res) => {
         try {
             dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEYレコード取得失敗: ${err.message}`] });
+            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEYレコード取得失敗: ${err.message}`], diagram });
         }
         
         const dnskeyRecords = dnskeyInfo.resourceRecords;
         if (dnskeyRecords.length === 0) {
-            return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'] });
+            return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'], diagram });
         }
         logs.push(logInfo(`子サーバーから DNSKEYレコードを ${dnskeyRecords.length} 件、取得しました。`));
+        diagram.child.dnskey = dnskeyRecords.map(key => ({
+            keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
+            flags: key.data.flags,
+            algorithm: key.data.algorithm
+        }));
         for (const dnskey of dnskeyRecords) {
             logs.push(...summarizeDnskeyRecord(dnskey));
         }
         
         // 3.5. DNSKEYレコード署名検証（オプション）
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
+        diagram.child.rrsig = dnskeyRrsig.map(rrsig => ({
+            keyTag: rrsig.data.keyTag,
+            typeCovered: rrsig.data.typeCovered,
+            algorithm: rrsig.data.algorithm,
+            verified: null
+        }));
         if (dnskeyRrsig.length > 0) {
             logs.push(logInfo(`子サーバーから DNSKEYレコードに対する署名 (RRSIG) を ${dnskeyRrsig.length} 件、取得しました。`));
             for (const rrsig of dnskeyRrsig) {
@@ -977,19 +1028,24 @@ app.post('/api/validate', async (req, res) => {
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
             let verifiedKeyTag = new Array();
-            for (const rrsig of dnskeyRrsig) {
+            for (let rrsigIndex = 0; rrsigIndex < dnskeyRrsig.length; rrsigIndex++) {
+                const rrsig = dnskeyRrsig[rrsigIndex];
+                let rrsigVerified = false;
                 for (const ksk of kskRecords) {
                     // DNSKEYレコードから Key Tag を計算
                     const calculatedKeyTag = calculateKeyTag(ksk.data.algorithm, buildDnskeyFullRdata(ksk.data));
                     if (ksk.data.algorithm === rrsig.data.algorithm && calculatedKeyTag === rrsig.data.keyTag) {
                         const signatureResult = verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex);
                         logs.push(signatureResult.reason);
+                        rrsigVerified = signatureResult.verified;
                         if (signatureResult.verified) {
                             signatureVerified = true;
+                            diagram.checks.dnskeySignature = true;
                             verifiedKeyTag.push(calculatedKeyTag);
                         }
                     }
                 }
+                diagram.child.rrsig[rrsigIndex].verified = rrsigVerified;
             }
             
             if (signatureVerified) {
@@ -1013,6 +1069,8 @@ app.post('/api/validate', async (req, res) => {
             }
         }
 
+        diagram.checks.dsKeyMatch = matchFound;
+
         if (matchFound) {
             success = true;
             logs.push(logComplete('検証成功: 親の DS と子の DNSKEY が正しく紐付いています！'));
@@ -1020,12 +1078,12 @@ app.post('/api/validate', async (req, res) => {
             logs.push(logError('検証失敗: 一致する鍵の組み合わせが見つかりませんでした。信頼の連鎖が切れています。'));
         }
 
-        res.json({ success, logs });
+        res.json({ success, logs, diagram });
 
     } catch (err) {
         const errorMsg = logCritical(`予期しないエラーが発生しました: ${err.message}`);
         logs.push(errorMsg);
-        res.status(500).json({ error: errorMsg, logs });
+        res.status(500).json({ error: errorMsg, logs, diagram });
     }
 });
 
@@ -1038,15 +1096,19 @@ app.get('/', (req, res) => {
         <meta charset="UTF-8">
         <title>DNSSEC委任状態検証ツール</title>
         <style>
-            body { font-family: sans-serif; margin: 0; padding: 20px; background: #f4f6f9; color: #333; }
-            .card { max-width: 800px; margin: 0 auto; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-            .form-group { margin-bottom: 20px; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; color: #34495e; }
+            :root { --ink: #172b4d; --muted: #667085; --line: #cbd5e1; --blue: #2563eb; --teal: #0f766e; --good: #15803d; --bad: #b42318; --paper: #f8fafc; }
+            * { box-sizing: border-box; }
+            body { font-family: Georgia, 'Yu Mincho', serif; margin: 0; padding: 32px 18px; background: linear-gradient(135deg, #e0f2fe, #f8fafc 45%, #fef3c7); color: var(--ink); }
+            .card { max-width: 1120px; margin: 0 auto; padding: 30px; background: rgba(255,255,255,.92); border: 1px solid rgba(23,43,77,.12); box-shadow: 0 18px 45px rgba(23,43,77,.12); }
+            h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0; }
+            .lead { margin: 0 0 24px; color: var(--muted); font-family: sans-serif; font-size: 14px; }
+            .form-group { margin-bottom: 24px; }
+            label { display: block; margin-bottom: 8px; font-weight: bold; }
             .input-row { display: flex; align-items: center; gap: 10px; }
-            input[type="text"] { flex: 1; min-width: 0; padding: 10px; box-sizing: border-box; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 14px; }
-            input[type="text"]:focus { border-color: #3498db; outline: none; }
-            button { background: #007bff; color: white; border: none; padding: 8px 25px; margin-bottom: 0; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; white-space: nowrap; }
-            button:hover { background: #0056b3; }
+            input[type="text"] { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; font: 15px sans-serif; }
+            input[type="text"]:focus { border-color: var(--blue); outline: 3px solid #bfdbfe; }
+            button { background: var(--ink); color: white; border: none; padding: 12px 24px; border-radius: 7px; cursor: pointer; font: bold 15px sans-serif; white-space: nowrap; }
+            button:hover { background: var(--blue); }
 
             @media (max-width: 560px) {
                 .input-row {
@@ -1059,27 +1121,49 @@ app.get('/', (req, res) => {
                 }
             }
 
-            /* 説明表示用の枠スタイル */
-            .explanation-title { font-weight: bold; margin-bottom: 5px; color: #7f8c8d; }
-            .explanation-box { background: #f0f0f0; padding: 15px; border-radius: 6px; border-left: 6px solid; border-color: #a0a0a0; font-size: 14px; }
-
-            /* 結果表示用の枠スタイル */
-            .result-status-box { padding: 15px 20px; border-radius: 6px; font-size: 18px; font-weight: bold; margin-top: 25px; display: none; border-left: 6px solid; }
-            .status-loading { background-color: #ebf5fb; color: #2980b9; border-color: #3498db; }
-            .status-success { background-color: #e8f8f5; color: #117a65; border-color: #2ecc71; }
-            .status-failed { background-color: #fce4d6; color: #c0392b; border-color: #e74c3c; }
-
-            /* 詳細ログの枠スタイル */
-            .log-title { font-weight: bold; margin-top: 20px; margin-bottom: 5px; color: #7f8c8d; display: none; }
-            .log-box {
-                background: #f0f0f0; padding: 15px; border-radius: 6px; border-left: 6px solid; border-color: #a0a0a0;
-                font-family: 'Courier New', monospace; font-size: 13px; margin-top: 5px; display: none; white-space: pre; overflow-x: scroll;
-            }
+            .explanation-title { display: none; }
+            .explanation-box { display: none; }
+            .result-status-box { padding: 13px 16px; border-radius: 7px; font: bold 16px sans-serif; margin: 20px 0; display: none; border-left: 5px solid; }
+            .status-loading { background: #eff6ff; color: #1d4ed8; border-color: var(--blue); }
+            .status-success { background: #ecfdf3; color: var(--good); border-color: var(--good); }
+            .status-failed { background: #fff1f0; color: var(--bad); border-color: var(--bad); }
+            .diagram { display: none; overflow-x: auto; padding: 14px 0 4px; font-family: sans-serif; }
+            .diagram-header { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
+            .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 12px sans-serif; }
+            .diagram-grid { min-width: 760px; display: grid; grid-template-columns: 1fr 150px 1fr; grid-template-rows: minmax(44px, auto) minmax(112px, auto) minmax(92px, auto) minmax(112px, auto) auto; align-items: center; gap: 0 16px; }
+            .zone { position: relative; z-index: 3; align-self: stretch; padding: 14px; background: transparent; border: 1px solid var(--line); border-radius: 9px; pointer-events: none; }
+            .zone-title { position: absolute; top: 10px; left: 14px; margin: 0; padding: 2px 6px; background: #f8fafc; border-radius: 4px; font-size: 14px; line-height: 1.4; color: var(--muted); white-space: nowrap; }
+            .node { position: relative; z-index: 2; justify-self: center; width: 86%; min-height: 112px; padding: 16px 14px; background: white; border: 2px solid var(--line); border-radius: 10px; box-shadow: 0 5px 12px rgba(23,43,77,.07); }
+            .node.good { border-color: #86efac; background: #f0fdf4; }
+            .node.bad { border-color: #fca5a5; background: #fff1f2; }
+            .node-title { font-weight: bold; font-size: 15px; }
+            .node-meta { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
+            .arrow { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; min-height: 46px; }
+            .arrow::before { content: ''; position: absolute; left: 0; right: 0; border-top: 2px solid var(--line); z-index: 0; }
+            .arrow::after { content: ''; position: absolute; right: -1px; top: 50%; width: 9px; height: 9px; border-top: 2px solid var(--line); border-right: 2px solid var(--line); transform: translateY(-50%) rotate(45deg); z-index: 0; }
+            .arrow span { position: relative; z-index: 1; padding: 4px 7px; background: #fff; border-radius: 5px; }
+            .arrow.good::before { border-color: #4ade80; }
+            .arrow.good::after { border-color: #4ade80; }
+            .arrow.good span { color: var(--good); }
+            .arrow.bad::before { border-color: #f87171; }
+            .arrow.bad::after { border-color: #f87171; }
+            .arrow.bad span { color: var(--bad); }
+            .parent-zone { grid-column: 1; grid-row: 1 / 6; }
+            .child-zone { grid-column: 3; grid-row: 1 / 6; }
+            .parent-ds { grid-column: 1; grid-row: 2; }
+            .parent-rrsig { grid-column: 1; grid-row: 3; }
+            .parent-key { grid-column: 1; grid-row: 4; }
+            .child-key { grid-column: 3; grid-row: 2; }
+            .child-rrsig { grid-column: 3; grid-row: 3; }
+            .chain-arrow { grid-column: 2; grid-row: 2; }
+            .signature-arrow { grid-column: 2; grid-row: 4; }
+            .legend { margin-top: 16px; color: var(--muted); font: 12px sans-serif; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h2>🔒 DNSSEC委任状態検証ツール</h2>
+            <h1>DNSSEC 委任チェーン</h1>
+            <p class="lead">親ゾーンの DS と、子ゾーンの KSK がどのように信頼されるかを可視化します。</p>
 
             <!-- 入力欄とボタンを <form> タグで囲み、onsubmitイベントを設定 -->
             <form id="validateForm" onsubmit="validate(event)">
@@ -1092,7 +1176,6 @@ app.get('/', (req, res) => {
               </div>
             </form>
 
-            <!-- 説明の枠 -->
             <div id="explanationTitle" class="explanation-title">📋 説明</div>
             <div id="explanationBox" class="explanation-box">
                 <a href="https://jprs.jp/glossary/index.php?ID=0158">フルサービスリゾルバー</a>のように、入力された
@@ -1102,12 +1185,22 @@ app.get('/', (req, res) => {
                 <a href="https://jprs.jp/glossary/index.php?ID=0213">DSレコード</a>を取得して、当該ドメイン名の権威サーバーが持つ DNSKEY と照合します。
             </div>
 
-            <!-- 判定結果を伝える専用の別枠 -->
             <div id="statusBox" class="result-status-box"></div>
-
-            <!-- 詳細ログの枠 -->
-            <div id="logTitle" class="log-title">📋 詳細ログ</div>
-            <div id="resultLogs" class="log-box"></div>
+            <section id="diagram" class="diagram" aria-live="polite">
+                <div class="diagram-header"><strong>検証結果の関係図</strong></div>
+                <div class="apex-summary"><span id="zoneApexSummary">ゾーン頂点：未確認</span></div>
+                <div class="diagram-grid">
+                    <div class="zone parent-zone"><p id="parentZoneTitle" class="zone-title">親ゾーン / 委任元</p></div>
+                    <div class="zone child-zone"><p id="childZoneTitle" class="zone-title">子ゾーン / 委任先</p></div>
+                    <div id="parentDs" class="node parent-ds"></div>
+                    <div id="parentRrsig" class="node parent-rrsig"></div>
+                    <div id="parentKey" class="node parent-key"></div>
+                    <div id="childKey" class="node child-key"></div>
+                    <div id="childRrsig" class="node child-rrsig"></div>
+                    <div id="chainArrow" class="arrow chain-arrow"></div>
+                </div>
+                <div class="legend">矢印のラベルは、その関係に対する署名検証またはハッシュ値検証の結果です。</div>
+            </section>
         </div>
 
         <script>
@@ -1129,16 +1222,78 @@ app.get('/', (req, res) => {
                 }
             });
 
+            const dnssecAlgorithmNames = {
+                1: 'RSAMD5',
+                5: 'RSASHA1',
+                7: 'RSASHA1-NSEC3-SHA1',
+                8: 'RSASHA256',
+                10: 'RSASHA512',
+                13: 'ECDSAP256SHA256',
+                14: 'ECDSAP384SHA384',
+                15: 'ED25519',
+                16: 'ED448'
+            };
+
+            function algorithmText(algorithm) {
+                return 'alg ' + algorithm + ' (' + (dnssecAlgorithmNames[algorithm] || 'Unknown') + ')';
+            }
+
+            function keyText(records, role) {
+                if (!records || records.length === 0) return role + ': 取得できませんでした';
+                return records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm)).join('<br>');
+            }
+
+            function dsText(records) {
+                if (!records || records.length === 0) return '取得できませんでした';
+                return records.map(record => {
+                    return 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + '<br>digest: ' + record.digest;
+                }).join('<br>');
+            }
+
+            function rrsigText(records) {
+                if (!records || records.length === 0) return '取得できませんでした';
+                return records.map(record => {
+                    const result = record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証';
+                    return 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + '<br>署名検証: ' + result;
+                }).join('<br><br>');
+            }
+
+            function emptyDiagram(domain) {
+                return {
+                    parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] },
+                    child: { name: domain, server: '', dnskey: [], rrsig: [] },
+                    checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
+                };
+            }
+
+            function renderDiagram(diagram) {
+                const parentKey = diagram.parent.dnskey.filter(key => key.flags === 256);
+                const childKsk = diagram.child.dnskey.filter(key => key.flags === 257);
+                document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
+                document.getElementById('childZoneTitle').textContent = '子ゾーン / 委任先 (' + (diagram.child.server || '権威サーバー未確認') + ')';
+                document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
+                document.getElementById('parentDs').innerHTML = '<div class="node-title">DS</div><div class="node-meta">' + dsText(diagram.parent.ds) + '<br>※ハッシュ値: 親が保持</div>';
+                document.getElementById('parentRrsig').innerHTML = '<div class="node-title">RRSIG(DS)</div><div class="node-meta">' + rrsigText(diagram.parent.rrsig) + '<br>※DSレコードをカバー</div>';
+                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY (ZSK)</div><div class="node-meta">' + keyText(parentKey, '親ZSK') + '<br>※DSの署名鍵</div>';
+                document.getElementById('childKey').innerHTML = '<div class="node-title">DNSKEY (KSK)</div><div class="node-meta">' + keyText(childKsk, '子KSK') + '<br>※DSのハッシュ対象</div>';
+                document.getElementById('childRrsig').innerHTML = '<div class="node-title">RRSIG(DNSKEY)</div><div class="node-meta">' + rrsigText(diagram.child.rrsig) + '<br>※DNSKEY RRsetをカバー</div>';
+                const chainOk = diagram.checks.dsKeyMatch;
+                const parentSignatureOk = diagram.checks.dsSignature;
+                const childSignatureOk = diagram.checks.dnskeySignature;
+                const chainArrow = document.getElementById('chainArrow');
+                chainArrow.className = 'arrow chain-arrow ' + (chainOk ? 'good' : 'bad');
+                chainArrow.innerHTML = '<span>' + (chainOk ? 'ハッシュ一致 ✓' : 'ハッシュ不一致 ✕') + '<br>DS -> KSK</span>';
+                document.getElementById('diagram').style.display = 'block';
+            }
+
             async function validate(event) {
-                // 画面が勝手にリロード（ページ遷移）するのを防ぐ
                 event.preventDefault();
 
                 let domain = domainInput.value.trim();
                 const statusBox = document.getElementById('statusBox');
-                const logTitle = document.getElementById('logTitle');
-                const resLogs = document.getElementById('resultLogs');
                 const explanationTitle = document.getElementById('explanationTitle');
                 const explanationBox = document.getElementById('explanationBox');
+                const diagram = document.getElementById('diagram');
 
                 try {
                     const urlObj = new URL(domain);
@@ -1155,8 +1310,7 @@ app.get('/', (req, res) => {
                 statusBox.className = 'result-status-box status-loading';
                 statusBox.innerText = '⏳ 検証中... (権威サーバーへ直接クエリを送信しています)';
 
-                logTitle.style.display = 'none';
-                resLogs.style.display = 'none';
+                renderDiagram(emptyDiagram(domain));
 
                 explanationTitle.style.display = 'none';
                 explanationBox.style.display = 'none';
@@ -1169,16 +1323,11 @@ app.get('/', (req, res) => {
                     });
                     const data = await response.json();
 
-                    // 詳細ログ枠の表示
-                    logTitle.style.display = 'block';
-                    resLogs.style.display = 'block';
-
                     if (data.error) {
                         statusBox.className = 'result-status-box status-failed';
                         statusBox.innerText = '❌ エラーが発生しました';
-                        resLogs.innerText = data.error;
+                        renderDiagram(data.diagram || emptyDiagram(domain));
                     } else {
-                        // 2. バックエンドの判定（success: true/false）に基づいて枠を切り替える
                         if (data.success) {
                             statusBox.className = 'result-status-box status-success';
                             statusBox.innerText = '🎉 検証成功: DNSSEC の委任状態は問題ありません！';
@@ -1186,13 +1335,12 @@ app.get('/', (req, res) => {
                             statusBox.className = 'result-status-box status-failed';
                             statusBox.innerText = '❌ 検証失敗: 信頼の連鎖が切れています';
                         }
-                        // 詳細ログを下の暗いボックスへ流し込む
-                        resLogs.innerText = data.logs.join('\\n');
+                        if (data.diagram) renderDiagram(data.diagram);
                     }
                 } catch(e) {
                     statusBox.className = 'result-status-box status-failed';
                     statusBox.innerText = '❌ 通信エラーが発生しました';
-                    resLogs.innerText = e.message;
+                    renderDiagram(emptyDiagram(domain));
                 }
             }
         </script>
