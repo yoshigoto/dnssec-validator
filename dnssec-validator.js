@@ -1042,17 +1042,17 @@ app.get('/', (req, res) => {
             .diagram { display: none; overflow-x: auto; padding: 14px 0 4px; font-family: sans-serif; }
             .diagram-header { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
             .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 12px sans-serif; }
-            .diagram-grid { min-width: 760px; display: grid; grid-template-columns: 1fr 150px 1fr; grid-template-rows: minmax(44px, auto) minmax(112px, auto) minmax(92px, auto) minmax(112px, auto) auto; align-items: center; gap: 0 16px; }
+            .diagram-grid { min-width: 500px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto auto minmax(58px, auto) auto auto auto; align-items: center; gap: 0 16px; }
             .zone { position: relative; z-index: 3; align-self: stretch; padding: 14px; background: transparent; border: 1px solid var(--line); border-radius: 9px; pointer-events: none; }
             .zone-title { position: absolute; top: 10px; left: 14px; margin: 0; padding: 2px 6px; border-radius: 4px; font-size: 14px; line-height: 1.4; color: var(--muted); white-space: nowrap; }
-            .node { position: relative; z-index: 2; justify-self: center; width: 86%; min-height: 112px; padding: 16px 14px; background: white; border: 2px solid var(--line); border-radius: 10px; box-shadow: 0 5px 12px rgba(23,43,77,.07); }
+            .node { position: relative; z-index: 2; justify-self: center; width: 86%; min-height: 80px; padding: 8px 14px; background: white; border: 2px solid var(--line); border-radius: 10px; box-shadow: 0 5px 12px rgba(23,43,77,.07); }
             .node.good { border-color: #86efac; background: #f0fdf4; }
             .node.bad { border-color: #fca5a5; background: #fff1f2; }
             .node-title { font-weight: bold; font-size: 15px; }
-            .node-meta { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
-            .arrow { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; min-height: 46px; }
-            .arrow::before { content: ''; position: absolute; left: 0; right: 0; border-top: 2px solid var(--line); z-index: 0; }
-            .arrow::after { content: ''; position: absolute; right: -1px; top: 50%; width: 9px; height: 9px; border-top: 2px solid var(--line); border-right: 2px solid var(--line); transform: translateY(-50%) rotate(45deg); z-index: 0; }
+            .node-meta { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; margin-left: 14px; }
+            .arrow { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; min-height: 80px; }
+            .arrow::before { content: ''; position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--line); z-index: 0; }
+            .arrow::after { content: ''; position: absolute; left: 50%; bottom: -1px; width: 9px; height: 9px; border-right: 2px solid var(--line); border-bottom: 2px solid var(--line); transform: translateX(-50%) rotate(45deg); z-index: 0; }
             .arrow span { position: relative; z-index: 1; padding: 4px 7px; background: #fff; border-radius: 5px; }
             .arrow.good::before { border-color: #4ade80; }
             .arrow.good::after { border-color: #4ade80; }
@@ -1060,14 +1060,14 @@ app.get('/', (req, res) => {
             .arrow.bad::before { border-color: #f87171; }
             .arrow.bad::after { border-color: #f87171; }
             .arrow.bad span { color: var(--bad); }
-            .parent-zone { grid-column: 1; grid-row: 1 / 6; }
-            .child-zone { grid-column: 3; grid-row: 1 / 6; }
-            .parent-ds { grid-column: 1; grid-row: 2; margin-bottom: 10px; }
-            .parent-rrsig { grid-column: 1; grid-row: 3; margin-bottom: 10px; }
-            .parent-key { grid-column: 1; grid-row: 4; margin-bottom: 10px; }
-            .child-key { grid-column: 3; grid-row: 2; }
-            .child-rrsig { grid-column: 3; grid-row: 3; }
-            .chain-arrow { grid-column: 2; grid-row: 2; }
+            .parent-zone { grid-column: 1; grid-row: 1 / 5; }
+            .child-zone { grid-column: 1; grid-row: 6 / 9; }
+            .parent-ds { grid-column: 1; grid-row: 3; margin-bottom: 10px; }
+            .parent-rrsig { grid-column: 1; grid-row: 2; margin-bottom: 10px; }
+            .parent-key { grid-column: 1; grid-row: 1; margin-bottom: 10px; margin-top: 36px; }
+            .child-key { grid-column: 1; grid-row: 6; margin-top: 36px; margin-bottom: 10px; }
+            .child-rrsig { grid-column: 1; grid-row: 7; margin-bottom: 10px; }
+            .chain-arrow { grid-column: 1; grid-row: 5; }
             .signature-arrow { grid-column: 2; grid-row: 4; }
             .legend { margin-top: 16px; color: var(--muted); font: 12px sans-serif; }
         </style>
@@ -1159,7 +1159,7 @@ app.get('/', (req, res) => {
             function dsText(records) {
                 if (!records || records.length === 0) return '取得できませんでした';
                 return records.map(record => {
-                    return 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + '<br>digest: ' + record.digest;
+                    return 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest;
                 }).join('<br>');
             }
 
@@ -1167,7 +1167,7 @@ app.get('/', (req, res) => {
                 if (!records || records.length === 0) return '取得できませんでした';
                 return records.map(record => {
                     const result = record.verified === true ? '成功 ✓' : record.verified === false ? '<span style="color: red;">失敗 ✕</span>' : '<span style="color: gray;">未検証</span>';
-                    return 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + '<br>署名検証: ' + result;
+                    return 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + result;
                 }).join('<br>');
             }
 
@@ -1185,11 +1185,11 @@ app.get('/', (req, res) => {
                 document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
                 document.getElementById('childZoneTitle').textContent = '子ゾーン / 委任先 (' + (diagram.child.server || '権威サーバー未確認') + ')';
                 document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
+                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY</div><div class="node-meta">' + keyText(parentKey, 'ZSK') + '<br>※DSの署名検証用公開鍵 (ZSKの秘密鍵はゾーンの RRset への署名に使われる)</div>';
+                document.getElementById('parentRrsig').innerHTML = '<div class="node-title">RRSIG</div><div class="node-meta">' + rrsigText(diagram.parent.rrsig) + '<br>※DSを対象とする電子署名</div>';
                 document.getElementById('parentDs').innerHTML = '<div class="node-title">DS</div><div class="node-meta">' + dsText(diagram.parent.ds) + '<br>※子KSKのハッシュ値</div>';
-                document.getElementById('parentRrsig').innerHTML = '<div class="node-title">RRSIG (DS)</div><div class="node-meta">' + rrsigText(diagram.parent.rrsig) + '<br>※DSを対象とする電子署名</div>';
-                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY (ZSK)</div><div class="node-meta">' + keyText(parentKey, '親ZSK') + '<br>※DSの署名検証用公開鍵<br>※ZSKの秘密鍵はゾーンの RRset への署名に使われる</div>';
-                document.getElementById('childKey').innerHTML = '<div class="node-title">DNSKEY (KSK)</div><div class="node-meta">' + keyText(childKsk, '子KSK') + '<br>※DNSKEY (子KSK/子ZSK) の署名検証用公開鍵<br>※KSKの秘密鍵は DNSKEY RRset への署名に使われる</div>';
-                document.getElementById('childRrsig').innerHTML = '<div class="node-title">RRSIG (DNSKEY)</div><div class="node-meta">' + rrsigText(diagram.child.rrsig) + '<br>※DNSKEY (子KSK/子ZSK) を対象とする電子署名</div>';
+                document.getElementById('childKey').innerHTML = '<div class="node-title">DNSKEY</div><div class="node-meta">' + keyText(childKsk, 'KSK') + '<br>※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)</div>';
+                document.getElementById('childRrsig').innerHTML = '<div class="node-title">RRSIG</div><div class="node-meta">' + rrsigText(diagram.child.rrsig) + '<br>※DNSKEY (KSK/ZSK) を対象とする電子署名</div>';
                 const chainOk = diagram.checks.dsKeyMatch;
                 const parentSignatureOk = diagram.checks.dsSignature;
                 const childSignatureOk = diagram.checks.dnskeySignature;
