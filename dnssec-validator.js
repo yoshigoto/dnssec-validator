@@ -735,7 +735,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
             return {
                 match: false,
                 keyTag: ac,
-                reason: `Key Tag [${ac}] は一致しますが、Digestが異なります。\n➕️ 子の計算ハッシュ値: ${calculatedDigest}\n➕️ 親の想定ハッシュ値: ${targetDigest}` };
+                reason: `Key Tag [${ac}] は一致しますが、Digestが異なります。\n 子の計算ハッシュ値: ${calculatedDigest}\n 親の想定ハッシュ値: ${targetDigest}` };
         }
     }
 
@@ -781,9 +781,9 @@ app.post('/api/validate', async (req, res) => {
         const zoneApexInfo = await getZoneApex(domain);
         if (zoneApexInfo.zoneApex === '') {
             if (zoneApexInfo.cdName) {
-                return res.json({ success: false, logs: [...logs, '⚠️ このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
+                return res.json({ success: false, logs: [...logs, 'このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
             } else {
-                return res.json({ success: false, logs: [...logs, `⚠️ ${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
+                return res.json({ success: false, logs: [...logs, `${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
             }
         }
         diagram.parent.name = zoneApexInfo.zoneApex;
@@ -823,12 +823,12 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-                return res.json({ success: false, logs: [...logs, '⚠️ 親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
+                return res.json({ success: false, logs: [...logs, '親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
         
         if (!parentIp) {
-            return res.json({ success: false, logs: [...logs, '❌ 親サーバーの IP アドレス取得に失敗しました。'], diagram });
+            return res.json({ success: false, logs: [...logs, '親サーバーの IP アドレス取得に失敗しました。'], diagram });
         }
         
         const dsRecords = dsInfo.resourceRecords;
@@ -897,7 +897,7 @@ app.post('/api/validate', async (req, res) => {
         try {
             childIp = await getARecord(zoneApexInfo.currentNs);
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `❌ 子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
+            return res.json({ success: false, logs: [...logs, `子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
         }
         
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -907,12 +907,12 @@ app.post('/api/validate', async (req, res) => {
         try {
             dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `❌ 子サーバーから DNSKEYレコード取得失敗: ${err.message}`], diagram });
+            return res.json({ success: false, logs: [...logs, `子サーバーから DNSKEYレコード取得失敗: ${err.message}`], diagram });
         }
         
         const dnskeyRecords = dnskeyInfo.resourceRecords;
         if (dnskeyRecords.length === 0) {
-            return res.json({ success: false, logs: [...logs, '❌ 子サーバーに DNSKEYレコードが存在しません。'], diagram });
+            return res.json({ success: false, logs: [...logs, '子サーバーに DNSKEYレコードが存在しません。'], diagram });
         }
         diagram.child.dnskey = dnskeyRecords.map(key => ({
             keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1214,7 +1214,7 @@ app.get('/', (req, res) => {
                 // 1. ローディング状態の表示
                 statusBox.style.display = 'block';
                 statusBox.className = 'result-status-box status-loading';
-                statusBox.innerText = '⏳ 検証中... (権威サーバーへ直接クエリを送信しています)';
+                statusBox.innerText = '検証中... (権威サーバーへ直接クエリを送信しています)';
                 errorDetailsElement.style.display = 'none';
                 errorDetailsElement.textContent = '';
 
@@ -1233,17 +1233,17 @@ app.get('/', (req, res) => {
 
                     if (data.error) {
                         statusBox.className = 'result-status-box status-failed';
-                        statusBox.innerText = '❌ エラーが発生しました';
+                        statusBox.innerText = 'エラーが発生しました';
                         errorDetailsElement.textContent = [data.error, ...(data.logs || [])].join(String.fromCharCode(10));
                         errorDetailsElement.style.display = 'block';
                         renderDiagram(data.diagram || emptyDiagram(domain));
                     } else {
                         if (data.success) {
                             statusBox.className = 'result-status-box status-success';
-                            statusBox.innerText = '🎉 検証成功: DNSSEC の委任状態は問題ありません！';
+                            statusBox.innerText = '検証成功: DNSSEC の委任状態は問題ありません！';
                         } else {
                             statusBox.className = 'result-status-box status-failed';
-                            statusBox.innerText = '❌ 検証失敗: 信頼の連鎖が切れています';
+                            statusBox.innerText = '検証失敗: 信頼の連鎖が切れています';
                             if (data.logs && data.logs.length > 0) {
                                 errorDetailsElement.textContent = data.logs.join(String.fromCharCode(10));
                                 errorDetailsElement.style.display = 'block';
@@ -1253,7 +1253,7 @@ app.get('/', (req, res) => {
                     }
                 } catch(e) {
                     statusBox.className = 'result-status-box status-failed';
-                    statusBox.innerText = '❌ 通信エラーが発生しました';
+                    statusBox.innerText = '通信エラーが発生しました';
                     errorDetailsElement.textContent = '詳細: ' + (e && e.message ? e.message : String(e));
                     errorDetailsElement.style.display = 'block';
                     renderDiagram(emptyDiagram(domain));
