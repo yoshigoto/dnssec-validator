@@ -1127,6 +1127,7 @@ app.get('/', (req, res) => {
             .status-loading { background: #eff6ff; color: #1d4ed8; border-color: var(--blue); }
             .status-success { background: #ecfdf3; color: var(--good); border-color: var(--good); }
             .status-failed { background: #fff1f0; color: var(--bad); border-color: var(--bad); }
+            .validation-error-details { display: none; margin: 12px 0 18px; padding: 12px 14px; background: #fff7ed; border: 1px solid #fed7aa; border-left: 4px solid #f97316; color: #7c2d12; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
             .diagram { display: none; overflow-x: auto; padding: 14px 0 4px; font-family: sans-serif; }
             .diagram-header { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
             .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 12px sans-serif; }
@@ -1186,6 +1187,7 @@ app.get('/', (req, res) => {
             </div>
 
             <div id="statusBox" class="result-status-box"></div>
+            <div id="validation-error-details" class="validation-error-details" role="alert"></div>
             <section id="diagram" class="diagram" aria-live="polite">
                 <div class="diagram-header"><strong>検証結果の関係図</strong></div>
                 <div class="apex-summary"><span id="zoneApexSummary">ゾーン頂点：未確認</span></div>
@@ -1291,6 +1293,7 @@ app.get('/', (req, res) => {
 
                 let domain = domainInput.value.trim();
                 const statusBox = document.getElementById('statusBox');
+                const errorDetailsElement = document.getElementById('validation-error-details');
                 const explanationTitle = document.getElementById('explanationTitle');
                 const explanationBox = document.getElementById('explanationBox');
                 const diagram = document.getElementById('diagram');
@@ -1309,6 +1312,8 @@ app.get('/', (req, res) => {
                 statusBox.style.display = 'block';
                 statusBox.className = 'result-status-box status-loading';
                 statusBox.innerText = '⏳ 検証中... (権威サーバーへ直接クエリを送信しています)';
+                errorDetailsElement.style.display = 'none';
+                errorDetailsElement.textContent = '';
 
                 renderDiagram(emptyDiagram(domain));
 
@@ -1326,6 +1331,8 @@ app.get('/', (req, res) => {
                     if (data.error) {
                         statusBox.className = 'result-status-box status-failed';
                         statusBox.innerText = '❌ エラーが発生しました';
+                        errorDetailsElement.textContent = [data.error, ...(data.logs || [])].join(String.fromCharCode(10));
+                        errorDetailsElement.style.display = 'block';
                         renderDiagram(data.diagram || emptyDiagram(domain));
                     } else {
                         if (data.success) {
@@ -1334,12 +1341,18 @@ app.get('/', (req, res) => {
                         } else {
                             statusBox.className = 'result-status-box status-failed';
                             statusBox.innerText = '❌ 検証失敗: 信頼の連鎖が切れています';
+                            if (data.logs && data.logs.length > 0) {
+                                errorDetailsElement.textContent = data.logs.join(String.fromCharCode(10));
+                                errorDetailsElement.style.display = 'block';
+                            }
                         }
                         if (data.diagram) renderDiagram(data.diagram);
                     }
                 } catch(e) {
                     statusBox.className = 'result-status-box status-failed';
                     statusBox.innerText = '❌ 通信エラーが発生しました';
+                    errorDetailsElement.textContent = '詳細: ' + (e && e.message ? e.message : String(e));
+                    errorDetailsElement.style.display = 'block';
                     renderDiagram(emptyDiagram(domain));
                 }
             }
