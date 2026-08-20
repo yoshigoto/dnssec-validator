@@ -1343,7 +1343,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-const PORT = 3002;
+const PORT = 3003;
 app.listen(PORT, () => {
     console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
 });
