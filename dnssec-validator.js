@@ -1,7 +1,6 @@
 const express = require('express');
 const net = require('net');
 const dgram = require('dgram');
-const dns = require('dns');
 const dnsPacket = require('dns-packet');	// https://github.com/mafintosh/dns-packet
 const dnsTypes = require('dns-packet/types');
 const crypto = require('crypto');
@@ -10,7 +9,7 @@ const app = express();
 app.use(express.json());
 
 // --- 定数定義 ---
-const ROOT_NAMESERVER = 'a.root-servers.net';
+const ROOT_NAMESERVER = '198.41.0.4'; // a.root-servers.net
 const MAX_RECURSION_DEPTH = 10;
 const DNS_QUERY_TIMEOUT = 5000;
 const DNS_UDP_PAYLOAD_SIZE = 1232;
@@ -74,19 +73,10 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (ルートサーバーのみ OS の名前解決、それ以外は getARecord) ---
+// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバや OS の名前解決には依存せず、getARecord で自前解決) ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
         return serverIp;
-    }
-
-    if (serverIp === ROOT_NAMESERVER) {
-        // ROOT_NAMESERVER 自体の解決に getARecord は使えない (循環参照になるため) ので OS の名前解決に委ねる
-        return await new Promise((resolve, reject) => {
-            dns.lookup(serverIp, { family: 4 }, (err, address) => {
-                if (err) reject(err); else resolve(address);
-            });
-        });
     }
 
     return await getARecord(serverIp);
@@ -221,6 +211,12 @@ async function getARecord(domain) {
             const nsAuthRecord = res.authorities.find(a => a.type === 'NS');
             if (nsAuthRecord) {
                 currentNs = nsAuthRecord.data;
+            } else {
+                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
+            }
+            const nsAdditionalRecord = res.additionals.find(a => a.type === 'A' && a.name === currentNs);
+            if (nsAdditionalRecord) {
+                currentNs = nsAdditionalRecord.data;
             } else {
                 throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
             }
