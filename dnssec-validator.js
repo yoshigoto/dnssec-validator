@@ -1074,7 +1074,7 @@ app.get('/', (req, res) => {
     </head>
     <body>
         <div class="card">
-            <h1>DNSSEC 委任チェーン</h1>
+            <h1>DNSSEC委任状態検証ツール</h1>
             <p class="lead">親ゾーンの DS と子ゾーンの KSK を元に信頼の連鎖を検証します。</p>
 
             <!-- 入力欄とボタンを <form> タグで囲み、onsubmitイベントを設定 -->
