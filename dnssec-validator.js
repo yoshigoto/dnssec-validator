@@ -50,7 +50,6 @@ function normalizeDomainName(domain) {
 // --- レート制限チェック関数 ---
 function checkRateLimit(clientIp) {
     const now = Date.now();
-    const oneMinuteAgo = now - 60000;
     
     if (!rateLimitMap.has(clientIp)) {
         rateLimitMap.set(clientIp, { count: 1, resetTime: now + 60000 });
@@ -73,13 +72,78 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバや OS の名前解決には依存せず、getARecord で自前解決) ---
+// --- キャッシュ: ルートから辿った委任情報 (ゾーン→ネームサーバー名) とネームサーバー名→IPアドレスの解決結果を getARecord/getZoneApex 間で使い回す ---
+const DEFAULT_CACHE_TTL_MS = 300000; // レコードに TTL が無い場合のフォールバック
+const delegationCache = new Map(); // zone(小文字・末尾ドット無し) -> { ns, parentNs, expiresAt }
+const nameserverIpCache = new Map(); // ホスト名(小文字・末尾ドット無し) -> { ip, expiresAt }
+
+function normalizeCacheKey(name) {
+    return (name || '').toLowerCase().replace(/\.$/, '') || '.';
+}
+
+// --- ヘルパー関数: 委任情報 (ゾーン→ネームサーバー名/親ネームサーバー名) をキャッシュに記録 ---
+function cacheDelegation(zone, ns, parentNs, ttlSeconds) {
+    if (!zone || !ns) return;
+    const ttlMs = (typeof ttlSeconds === 'number' && ttlSeconds > 0) ? ttlSeconds * 1000 : DEFAULT_CACHE_TTL_MS;
+    delegationCache.set(normalizeCacheKey(zone), { ns, parentNs: parentNs || '', expiresAt: Date.now() + ttlMs });
+}
+
+// --- ヘルパー関数: ドメイン名に最も近い委任情報をキャッシュから探す (ルートからの再探索を省略) ---
+function findCachedDelegation(domain) {
+    const labels = normalizeCacheKey(domain).split('.');
+    for (let i = 0; i < labels.length; i++) {
+        const zone = labels.slice(i).join('.') || '.';
+        const cached = delegationCache.get(zone);
+        if (!cached) continue;
+        if (Date.now() > cached.expiresAt) {
+            delegationCache.delete(zone);
+            continue;
+        }
+        return cached;
+    }
+    return null;
+}
+
+// --- ヘルパー関数: ネームサーバー名の IP アドレス解決結果をキャッシュに記録 ---
+function cacheNameserverIp(hostname, ip, ttlSeconds) {
+    if (!hostname || !ip) return;
+    const ttlMs = (typeof ttlSeconds === 'number' && ttlSeconds > 0) ? ttlSeconds * 1000 : DEFAULT_CACHE_TTL_MS;
+    nameserverIpCache.set(normalizeCacheKey(hostname), { ip, expiresAt: Date.now() + ttlMs });
+}
+
+// --- ヘルパー関数: キャッシュ済みのネームサーバー IP アドレスを取得 ---
+function getCachedNameserverIp(hostname) {
+    const key = normalizeCacheKey(hostname);
+    const cached = nameserverIpCache.get(key);
+    if (!cached) return null;
+    if (Date.now() > cached.expiresAt) {
+        nameserverIpCache.delete(key);
+        return null;
+    }
+    return cached.ip;
+}
+
+// --- ヘルパー関数: キャッシュされた委任先が解決対象自身のホスト名と同じ (自己参照) 場合は使わない ---
+function isUsableCachedNs(candidateNs, targetDomain) {
+    if (!candidateNs) return false;
+    if (net.isIP(candidateNs)) return true;
+    return normalizeCacheKey(candidateNs) !== normalizeCacheKey(targetDomain);
+}
+
+// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバや OS の名前解決には依存せず、キャッシュと getARecord で自前解決) ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
         return serverIp;
     }
 
-    return await getARecord(serverIp);
+    const cachedIp = getCachedNameserverIp(serverIp);
+    if (cachedIp) {
+        return cachedIp;
+    }
+
+    const ip = await getARecord(serverIp);
+    cacheNameserverIp(serverIp, ip);
+    return ip;
 }
 
 // --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
@@ -189,6 +253,7 @@ async function getResourceRecord(domain, serverIp, rType) {
 }
 
 // --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
+// ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
 async function getARecord(domain) {
     let currentNs = ROOT_NAMESERVER;
     let ipAddress = '';
@@ -210,12 +275,14 @@ async function getARecord(domain) {
             }
             const nsAuthRecord = res.authorities.find(a => a.type === 'NS');
             if (nsAuthRecord) {
+                cacheDelegation(nsAuthRecord.name, nsAuthRecord.data, currentNs, nsAuthRecord.ttl);
                 currentNs = nsAuthRecord.data;
             } else {
                 throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
             }
             const nsAdditionalRecord = res.additionals.find(a => a.type === 'A' && a.name === currentNs);
             if (nsAdditionalRecord) {
+                cacheNameserverIp(currentNs, nsAdditionalRecord.data, nsAdditionalRecord.ttl);
                 currentNs = nsAdditionalRecord.data;
             } else {
                 throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
@@ -236,8 +303,10 @@ async function getARecord(domain) {
 
 // --- ヘルパー関数: ゾーン頂点をルートから辿って取得する (エラーハンドリング強化版) ---
 async function getZoneApex(domain) {
-    let currentNs = ROOT_NAMESERVER;
-    let parentNs = '';
+    const cachedDelegation = findCachedDelegation(domain);
+    const useCachedDelegation = cachedDelegation && isUsableCachedNs(cachedDelegation.ns, domain);
+    let currentNs = useCachedDelegation ? cachedDelegation.ns : ROOT_NAMESERVER;
+    let parentNs = useCachedDelegation ? cachedDelegation.parentNs : '';
     let zoneApex = '';
     let rcode = '';
     let cdName = false;
@@ -314,6 +383,7 @@ async function getZoneApex(domain) {
         if (!isAuthoritative && authorities.length > 0) {
             const nsRecord = authorities.find(r => r.type === 'NS');
             if (nsRecord) {
+                cacheDelegation(nsRecord.name, nsRecord.data, currentNs, nsRecord.ttl);
                 parentNs = currentNs;
                 currentNs = nsRecord.data;
             }
