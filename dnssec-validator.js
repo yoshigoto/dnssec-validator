@@ -994,6 +994,13 @@ app.post('/api/validate', async (req, res) => {
             
             if (signatureVerified !== true) {
                 logs.push(`DNSKEYレコードに関する署名検証に失敗しました。`);
+            } else {
+                // 自己署名検証に使われた KSK が親ゾーンの DSレコードの Key Tag と一致するか確認
+                const dsRecordKeyTags = dsRecords.map(ds => ds.data.keyTag);
+                const unmatchedKskKeyTags = [...new Set(verifiedKeyTag)].filter(keyTag => !dsRecordKeyTags.includes(keyTag));
+                if (unmatchedKskKeyTags.length > 0) {
+                    logs.push(`DNSKEYレコードの署名検証に使用した KSK (Key Tag: ${unmatchedKskKeyTags.join(', ')}) は、親ゾーンの DSレコードの Key Tag と一致しません。`);
+                }
             }
         } else {
             logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
