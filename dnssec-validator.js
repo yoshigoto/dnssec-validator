@@ -228,6 +228,12 @@ async function getARecord(domain) {
             } else {
                 throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
             }
+            const nsAdditionalRecord = res.additionals.find(a => a.type === 'NS');
+            if (nsAdditionalRecord) {
+                currentNs = nsAdditionalRecord.data;
+            } else {
+                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
+            }
         } catch (err) {
             if (i === MAX_RECURSION_DEPTH - 1) {
                 throw new Error(`Aレコード取得失敗 [${domain}]: ${err.message}`);
