@@ -73,68 +73,101 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 ---
+// --- 定数: ローカルで稼働するフルサービスリゾルバの IP アドレス ---
+const LOCAL_RESOLVER_IP = '127.0.0.1';
+
+// --- ヘルパー関数: ネームサーバー名を 127.0.0.1 の CDフラグ付きクエリで IP アドレスに解決 ---
+async function resolveNameserverIp(serverIp) {
+    if (net.isIP(serverIp)) {
+        return serverIp;
+    }
+
+    const buf = dnsPacket.encode({
+        type: 'query',
+        id: Math.floor(Math.random() * 65535),
+        flags: dnsPacket.CHECKING_DISABLED,
+        questions: [{ type: 'A', name: serverIp }],
+        additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
+    });
+    const msg = await queryDnsUdp(LOCAL_RESOLVER_IP, buf);
+    const res = dnsPacket.decode(msg);
+    const aRecord = (res.answers || []).find(a => a.type === 'A');
+    if (!aRecord) {
+        throw new Error(`ネームサーバー名 [${serverIp}] の名前解決に失敗しました (127.0.0.1 のフルサービスリゾルバから応答なし)`);
+    }
+    return aRecord.data;
+}
+
+// --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
 function queryDnsUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
     return new Promise((resolve, reject) => {
-        const client = dgram.createSocket('udp4');
-        const timer = setTimeout(() => {
-            client.close();
-            reject(new Error(`タイムアウト (${timeout}ms): ${serverIp}`));
-        }, timeout);
+        (async () => {
+            const resolvedIp = net.isIP(serverIp) ? serverIp : await resolveNameserverIp(serverIp);
 
-        client.on('message', (msg) => {
-            clearTimeout(timer);
-            client.close();
-            resolve(msg);
-        });
+            const client = dgram.createSocket('udp4');
+            const timer = setTimeout(() => {
+                client.close();
+                reject(new Error(`タイムアウト (${timeout}ms): ${serverIp}`));
+            }, timeout);
 
-        client.on('error', (err) => {
-            clearTimeout(timer);
-            client.close();
-            reject(err);
-        });
+            client.on('message', (msg) => {
+                clearTimeout(timer);
+                client.close();
+                resolve(msg);
+            });
 
-        client.send(buf, 0, buf.length, 53, serverIp);
+            client.on('error', (err) => {
+                clearTimeout(timer);
+                client.close();
+                reject(err);
+            });
+
+            client.send(buf, 0, buf.length, 53, resolvedIp);
+        })().catch(reject);
     });
 }
 
-// --- ヘルパー関数: 指定したIPアドレスにTCPでDNSクエリを送信 ---
+// --- ヘルパー関数: 指定したIPアドレスにTCPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
 function queryDnsTcp(serverIp, buf) {
     return new Promise((resolve, reject) => {
-        var responseBuffer = null;
-        var expectedLength = 0;
-        const client = new net.Socket();
+        (async () => {
+            const resolvedIp = net.isIP(serverIp) ? serverIp : await resolveNameserverIp(serverIp);
 
-        client.connect(53, serverIp, () => {
-            client.write(buf);
-        });
+            var responseBuffer = null;
+            var expectedLength = 0;
+            const client = new net.Socket();
 
-        client.on('data', (data) => {
-            if (responseBuffer == null) {
-                if (data.byteLength > 1) {
-                    const plen = data.readUInt16BE(0);
-                    expectedLength = plen;
-                    responseBuffer = Buffer.from(data);
+            client.connect(53, resolvedIp, () => {
+                client.write(buf);
+            });
+
+            client.on('data', (data) => {
+                if (responseBuffer == null) {
+                    if (data.byteLength > 1) {
+                        const plen = data.readUInt16BE(0);
+                        expectedLength = plen;
+                        responseBuffer = Buffer.from(data);
+                    }
+                } else {
+                    responseBuffer = Buffer.concat([responseBuffer, data]);
                 }
-            } else {
-                responseBuffer = Buffer.concat([responseBuffer, data]);
-            }
-            if (responseBuffer.byteLength >= expectedLength) {
-                client.end();
-            }
-        });
+                if (responseBuffer.byteLength >= expectedLength) {
+                    client.end();
+                }
+            });
 
-        client.on('error', (err) => {
-            reject(err);
-        });
+            client.on('error', (err) => {
+                reject(err);
+            });
 
-        client.on('close', (hadError) => {
-            if (!hadError) {
-                resolve(responseBuffer);
-            } else {
-                reject(hadError);
-            }
-        });
+            client.on('close', (hadError) => {
+                if (!hadError) {
+                    resolve(responseBuffer);
+                } else {
+                    reject(hadError);
+                }
+            });
+        })().catch(reject);
     });
 }
 
