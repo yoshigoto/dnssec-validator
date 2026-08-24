@@ -1,6 +1,7 @@
 const express = require('express');
 const net = require('net');
 const dgram = require('dgram');
+const dns = require('dns');
 const dnsPacket = require('dns-packet');	// https://github.com/mafintosh/dns-packet
 const dnsTypes = require('dns-packet/types');
 const crypto = require('crypto');
@@ -16,7 +17,6 @@ const DNS_UDP_PAYLOAD_SIZE = 1232;
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
-const LOCAL_RESOLVER_IP = '127.0.0.1';
 
 // --- ドメイン名バリデーション関数 ---
 function validateDomainName(domain) {
@@ -74,26 +74,22 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- ヘルパー関数: ネームサーバー名を 127.0.0.1 の CDフラグ付きクエリで IP アドレスに解決 ---
+// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (ルートサーバーのみ OS の名前解決、それ以外は getARecord) ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
         return serverIp;
     }
 
-    const buf = dnsPacket.encode({
-        type: 'query',
-        id: Math.floor(Math.random() * 65535),
-        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.CHECKING_DISABLED,
-        questions: [{ type: 'A', name: serverIp }],
-        additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
-    });
-    const msg = await queryDnsUdp(LOCAL_RESOLVER_IP, buf);
-    const res = dnsPacket.decode(msg);
-    const aRecord = (res.answers || []).find(a => a.type === 'A');
-    if (!aRecord) {
-        throw new Error(`ネームサーバー名 [${serverIp}] の名前解決に失敗しました (127.0.0.1 のフルサービスリゾルバから応答なし)`);
+    if (serverIp === ROOT_NAMESERVER) {
+        // ROOT_NAMESERVER 自体の解決に getARecord は使えない (循環参照になるため) ので OS の名前解決に委ねる
+        return await new Promise((resolve, reject) => {
+            dns.lookup(serverIp, { family: 4 }, (err, address) => {
+                if (err) reject(err); else resolve(address);
+            });
+        });
     }
-    return aRecord.data;
+
+    return await getARecord(serverIp);
 }
 
 // --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
