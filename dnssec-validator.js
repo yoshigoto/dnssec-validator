@@ -16,6 +16,7 @@ const DNS_UDP_PAYLOAD_SIZE = 1232;
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
+const LOCAL_RESOLVER_IP = '127.0.0.1';
 
 // --- ドメイン名バリデーション関数 ---
 function validateDomainName(domain) {
@@ -73,9 +74,6 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- 定数: ローカルで稼働するフルサービスリゾルバの IP アドレス ---
-const LOCAL_RESOLVER_IP = '127.0.0.1';
-
 // --- ヘルパー関数: ネームサーバー名を 127.0.0.1 の CDフラグ付きクエリで IP アドレスに解決 ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
@@ -85,7 +83,7 @@ async function resolveNameserverIp(serverIp) {
     const buf = dnsPacket.encode({
         type: 'query',
         id: Math.floor(Math.random() * 65535),
-        flags: dnsPacket.CHECKING_DISABLED,
+        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.CHECKING_DISABLED,
         questions: [{ type: 'A', name: serverIp }],
         additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
     });
