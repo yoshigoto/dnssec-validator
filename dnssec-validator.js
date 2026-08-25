@@ -1247,7 +1247,7 @@ app.get('/', (req, res) => {
                     <div id="childRrsig" class="node child-rrsig"></div>
                     <div id="chainArrow" class="arrow chain-arrow"></div>
                 </div>
-                <div class="legend">矢印のラベルは、その関係に対するハッシュ値検証の結果です。</div>
+                <div class="legend">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
             </section>
         </div>
 
