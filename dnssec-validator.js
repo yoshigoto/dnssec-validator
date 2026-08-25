@@ -277,9 +277,7 @@ async function getARecord(domain) {
     let ipAddress = '';
     let candidateQueue = []; // 現在の委任レベルで未試行の NS 候補 (優先NSが失敗した際のフォールバック用)
 
-    console.log(`getARecord: ${domain} の A レコードを取得します。ルートから辿ります。`);
     for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
-        console.log(`getARecord: ${domain} の A レコード取得試行 ${i + 1}/${MAX_RECURSION_DEPTH} (ネームサーバー: ${currentNs})`);
         try {
             const buf = dnsPacket.encode({
                 type: 'query',
