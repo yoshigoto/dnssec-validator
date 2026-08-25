@@ -130,6 +130,9 @@ function isUsableCachedNs(candidateNs, targetDomain) {
     return normalizeCacheKey(candidateNs) !== normalizeCacheKey(targetDomain);
 }
 
+// --- ネームサーバー名解決が自己参照して循環しているかを検出するための進行中セット ---
+const inFlightNsResolutions = new Set();
+
 // --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバや OS の名前解決には依存せず、キャッシュと getARecord で自前解決) ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
@@ -141,9 +144,19 @@ async function resolveNameserverIp(serverIp) {
         return cachedIp;
     }
 
-    const ip = await getARecord(serverIp);
-    cacheNameserverIp(serverIp, ip);
-    return ip;
+    const key = normalizeCacheKey(serverIp);
+    if (inFlightNsResolutions.has(key)) {
+        throw new Error(`ネームサーバー名 [${serverIp}] の解決が循環参照になっています (グルーレコードが不足している可能性があります)`);
+    }
+
+    inFlightNsResolutions.add(key);
+    try {
+        const ip = await getARecord(serverIp);
+        cacheNameserverIp(serverIp, ip);
+        return ip;
+    } finally {
+        inFlightNsResolutions.delete(key);
+    }
 }
 
 // --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
@@ -257,6 +270,7 @@ async function getResourceRecord(domain, serverIp, rType) {
 async function getARecord(domain) {
     let currentNs = ROOT_NAMESERVER;
     let ipAddress = '';
+    let candidateQueue = []; // 現在の委任レベルで未試行の NS 候補 (優先NSが失敗した際のフォールバック用)
 
     for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
         try {
@@ -273,21 +287,31 @@ async function getARecord(domain) {
                 ipAddress = aRecord.data;
                 break;
             }
-            const nsAuthRecord = res.authorities.find(a => a.type === 'NS');
-            if (nsAuthRecord) {
+            const nsAuthRecords = res.authorities.filter(a => a.type === 'NS');
+            if (nsAuthRecords.length === 0) {
+                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
+            }
+            // グルーレコード (additionals の A) を持つ NS を優先候補にし、残りはフォールバック候補として保持する (捨てない)
+            const candidates = nsAuthRecords.map(nsAuthRecord => {
+                const glueA = res.additionals.find(a => a.type === 'A' && a.name === nsAuthRecord.data);
                 cacheDelegation(nsAuthRecord.name, nsAuthRecord.data, currentNs, nsAuthRecord.ttl);
-                currentNs = nsAuthRecord.data;
-            } else {
-                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
-            }
-            const nsAdditionalRecord = res.additionals.find(a => a.type === 'A' && a.name === currentNs);
-            if (nsAdditionalRecord) {
-                cacheNameserverIp(currentNs, nsAdditionalRecord.data, nsAdditionalRecord.ttl);
-                currentNs = nsAdditionalRecord.data;
-            } else {
-                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
-            }
+                if (glueA) {
+                    cacheNameserverIp(nsAuthRecord.data, glueA.data, glueA.ttl);
+                }
+                return { name: nsAuthRecord.data, ip: glueA ? glueA.data : null };
+            });
+            candidates.sort((a, b) => (a.ip ? 0 : 1) - (b.ip ? 0 : 1));
+
+            const chosen = candidates.shift();
+            candidateQueue = candidates;
+            currentNs = chosen.ip || chosen.name;
         } catch (err) {
+            // 優先NSが失敗した場合、同じ委任レベルで捨てていない他の NS 候補を試す
+            if (candidateQueue.length > 0) {
+                const next = candidateQueue.shift();
+                currentNs = next.ip || next.name;
+                continue;
+            }
             if (i === MAX_RECURSION_DEPTH - 1) {
                 throw new Error(`Aレコード取得失敗 [${domain}]: ${err.message}`);
             }
@@ -381,11 +405,26 @@ async function getZoneApex(domain) {
             }
         }
         if (!isAuthoritative && authorities.length > 0) {
-            const nsRecord = authorities.find(r => r.type === 'NS');
-            if (nsRecord) {
-                cacheDelegation(nsRecord.name, nsRecord.data, currentNs, nsRecord.ttl);
+            const nsRecords = authorities.filter(r => r.type === 'NS');
+            if (nsRecords.length > 0) {
+                // グルーレコード (additionals の A) を持つ NS を優先選択し、ホスト名解決による getARecord の循環参照を回避する
+                let chosenNsRecord = null;
+                let chosenNsIp = null;
+                for (const nsRecord of nsRecords) {
+                    const glueA = additionals.find(a => a.type === 'A' && a.name === nsRecord.data);
+                    if (glueA) {
+                        chosenNsRecord = nsRecord;
+                        chosenNsIp = glueA.data;
+                        cacheNameserverIp(nsRecord.data, glueA.data, glueA.ttl);
+                        break;
+                    }
+                }
+                if (!chosenNsRecord) {
+                    chosenNsRecord = nsRecords[0];
+                }
+                cacheDelegation(chosenNsRecord.name, chosenNsRecord.data, currentNs, chosenNsRecord.ttl);
                 parentNs = currentNs;
-                currentNs = nsRecord.data;
+                currentNs = chosenNsIp || chosenNsRecord.data;
             }
         }
     }
