@@ -268,11 +268,18 @@ async function getResourceRecord(domain, serverIp, rType) {
 // --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
 // ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
 async function getARecord(domain) {
+    // domain が既に IP アドレスの場合は問い合わせ不要
+    if (net.isIP(domain)) {
+        return domain;
+    }
+
     let currentNs = ROOT_NAMESERVER;
     let ipAddress = '';
     let candidateQueue = []; // 現在の委任レベルで未試行の NS 候補 (優先NSが失敗した際のフォールバック用)
 
+    console.log(`getARecord: ${domain} の A レコードを取得します。ルートから辿ります。`);
     for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
+        console.log(`getARecord: ${domain} の A レコード取得試行 ${i + 1}/${MAX_RECURSION_DEPTH} (ネームサーバー: ${currentNs})`);
         try {
             const buf = dnsPacket.encode({
                 type: 'query',
