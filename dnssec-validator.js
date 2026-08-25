@@ -436,18 +436,6 @@ async function getZoneApex(domain) {
         }
     }
 
-    const nsInfo = await getResourceRecord(zoneApex, currentNs, 'NS');
-    if (nsInfo) {
-        const nsRecord = nsInfo.resourceRecords.find(r => r.data === currentNs);
-        if (!nsRecord) {
-            const newNs = nsInfo.resourceRecords.find(r => r.type === 'NS');
-            if (newNs && newNs.data.length > 0) {
-                parentNs = currentNs;
-                currentNs = newNs.data;
-            }
-        }
-    }
-
     return { currentNs: currentNs, parentNs: parentNs, zoneApex: zoneApex, rcode: rcode, cdName: cdName };
 }
 
