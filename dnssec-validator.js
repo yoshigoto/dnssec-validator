@@ -341,11 +341,9 @@ async function getZoneApex(domain) {
     let cdName = false;
 
     for (let i = 0; i < 10; i++) {
-        // 権威サーバー側の DNSSEC 検証エラーで応答が得られない事態を避けるため CD (Checking Disabled) を付与
         let buf = dnsPacket.encode({
             type: 'query',
             id: Math.floor(Math.random() * 65535),
-            flags: dnsPacket.CHECKING_DISABLED,
             questions: [{ type: 'SOA', name: domain }],
             additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
         });
@@ -356,7 +354,6 @@ async function getZoneApex(domain) {
             buf = dnsPacket.streamEncode({
                 type: 'query',
                 id: Math.floor(Math.random() * 65535),
-                flags: dnsPacket.CHECKING_DISABLED,
                 questions: [{ type: 'SOA', name: domain }]
             });
             msg = await queryDnsTcp(currentNs, buf);
