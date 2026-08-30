@@ -6,7 +6,18 @@ const dnsTypes = require('dns-packet/types');
 const crypto = require('crypto');
 
 const app = express();
+app.disable('x-powered-by');
 app.use(express.json());
+app.use((req, res, next) => {
+    res.set({
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer',
+        'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+        'Content-Security-Policy': "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'"
+    });
+    next();
+});
 
 // --- 定数定義 ---
 const ROOT_NAMESERVER = '198.41.0.4'; // a.root-servers.net
@@ -1253,16 +1264,32 @@ app.get('/', (req, res) => {
             const savedDomainKey = 'dnssec-validator-domain';
             const urlParams = new URLSearchParams(window.location.search);
             const domainFromUrl = urlParams.get('domain');
+            const MAX_DISPLAY_TEXT_LENGTH = 2000;
+
+            function sanitizeDisplayText(value) {
+                const text = (value === null || value === undefined ? '' : String(value))
+                    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                return text.slice(0, MAX_DISPLAY_TEXT_LENGTH);
+            }
+
+            function sanitizeDisplayLines(value) {
+                if (Array.isArray(value)) {
+                    return value.map(item => sanitizeDisplayText(item));
+                }
+                return [sanitizeDisplayText(value)];
+            }
 
             try {
-                domainInput.value = domainFromUrl || localStorage.getItem(savedDomainKey) || '';
+                domainInput.value = sanitizeDisplayText(domainFromUrl || localStorage.getItem(savedDomainKey) || '');
             } catch (e) {
-                domainInput.value = domainFromUrl || '';
+                domainInput.value = sanitizeDisplayText(domainFromUrl || '');
             }
 
             domainInput.addEventListener('input', () => {
                 try {
-                    localStorage.setItem(savedDomainKey, domainInput.value);
+                    localStorage.setItem(savedDomainKey, sanitizeDisplayText(domainInput.value));
                 } catch (e) {
                 }
             });
@@ -1284,23 +1311,49 @@ app.get('/', (req, res) => {
             }
 
             function keyText(records, role) {
-                if (!records || records.length === 0) return role + ': 取得できませんでした';
-                return records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm)).join('<br>');
+                if (!records || records.length === 0) return [role + ': 取得できませんでした'];
+                return records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm));
             }
 
             function dsText(records) {
-                if (!records || records.length === 0) return '取得できませんでした';
+                if (!records || records.length === 0) return ['取得できませんでした'];
                 return records.map(record => {
                     return 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest;
-                }).join('<br>');
+                });
             }
 
             function rrsigText(records) {
-                if (!records || records.length === 0) return '取得できませんでした';
+                if (!records || records.length === 0) return ['取得できませんでした'];
                 return records.map(record => {
-                    const result = record.verified === true ? '成功 ✓' : record.verified === false ? '<span style="color: red;">失敗 ✕</span>' : '<span style="color: gray;">未検証</span>';
+                    const result = record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証';
                     return 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + result;
-                }).join('<br>');
+                });
+            }
+
+            function setNodeContent(nodeId, title, titleColor, lines) {
+                const node = document.getElementById(nodeId);
+                node.replaceChildren();
+
+                const titleElement = document.createElement('div');
+                titleElement.className = 'node-title';
+                if (titleColor) {
+                    titleElement.style.color = titleColor;
+                }
+                titleElement.textContent = sanitizeDisplayText(title);
+                node.appendChild(titleElement);
+
+                const metaElement = document.createElement('div');
+                metaElement.className = 'node-meta';
+
+                const safeLines = sanitizeDisplayLines(lines);
+                safeLines.forEach((line, index) => {
+                    if (index > 0) {
+                        metaElement.appendChild(document.createElement('br'));
+                    }
+                    metaElement.appendChild(document.createTextNode(line || ''));
+                });
+
+                node.appendChild(metaElement);
             }
 
             function emptyDiagram(domain) {
@@ -1317,17 +1370,21 @@ app.get('/', (req, res) => {
                 document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
                 document.getElementById('childZoneTitle').textContent = '子ゾーン / 委任先 (' + (diagram.child.server || '権威サーバー未確認') + ')';
                 document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
-                document.getElementById('parentKey').innerHTML = '<div class="node-title">DNSKEY</div><div class="node-meta">' + keyText(parentKey, 'ZSK') + '<br>※DSの署名検証用公開鍵 (ZSKの秘密鍵はゾーンの RRset への署名に使われる)</div>';
-                document.getElementById('parentRrsig').innerHTML = '<div class="node-title">RRSIG</div><div class="node-meta">' + rrsigText(diagram.parent.rrsig) + '<br>※DSを対象とする電子署名</div>';
-                document.getElementById('parentDs').innerHTML = '<div class="node-title" style="color: blue;">DS</div><div class="node-meta">' + dsText(diagram.parent.ds) + '<br>※子KSKのハッシュ値</div>';
-                document.getElementById('childKey').innerHTML = '<div class="node-title" style="color: blue;">DNSKEY</div><div class="node-meta">' + keyText(childKsk, 'KSK') + '<br>※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)</div>';
-                document.getElementById('childRrsig').innerHTML = '<div class="node-title">RRSIG</div><div class="node-meta">' + rrsigText(diagram.child.rrsig) + '<br>※DNSKEY (KSK/ZSK) を対象とする電子署名</div>';
+
+                setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵 (ZSKの秘密鍵はゾーンの RRset への署名に使われる)']);
+                setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
+                setNodeContent('parentDs', 'DS', 'blue', [...dsText(diagram.parent.ds), '※子KSKのハッシュ値']);
+                setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)']);
+                setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
+
                 const chainOk = diagram.checks.dsKeyMatch;
-                const parentSignatureOk = diagram.checks.dsSignature;
-                const childSignatureOk = diagram.checks.dnskeySignature;
                 const chainArrow = document.getElementById('chainArrow');
                 chainArrow.className = 'arrow chain-arrow ' + (chainOk ? 'good' : 'bad');
-                chainArrow.innerHTML = '<span>' + (chainOk ? 'ハッシュ一致 ✓' : 'ハッシュ不一致 ✕') + '<br>DS -> KSK</span>';
+                chainArrow.replaceChildren();
+                const chainLabel = document.createElement('span');
+                chainLabel.textContent = (chainOk ? 'ハッシュ一致 ✓' : 'ハッシュ不一致 ✕') + '\nDS -> KSK';
+                chainLabel.style.whiteSpace = 'pre-line';
+                chainArrow.appendChild(chainLabel);
                 document.getElementById('diagram').style.display = 'block';
             }
 
@@ -1374,7 +1431,7 @@ app.get('/', (req, res) => {
                     if (data.error) {
                         statusBox.className = 'result-status-box status-failed';
                         statusBox.innerText = 'エラーが発生しました';
-                        errorDetailsElement.textContent = [data.error, ...(data.logs || [])].join(String.fromCharCode(10));
+                        errorDetailsElement.textContent = sanitizeDisplayText([data.error, ...(data.logs || [])].join(String.fromCharCode(10)));
                         errorDetailsElement.style.display = 'block';
                         renderDiagram(data.diagram || emptyDiagram(domain));
                     } else {
@@ -1382,14 +1439,14 @@ app.get('/', (req, res) => {
                             statusBox.className = 'result-status-box status-success';
                             statusBox.innerText = '検証成功: DNSSEC の委任状態は問題ありません！';
                             if (data.logs && data.logs.length > 0) {
-                                errorDetailsElement.textContent = data.logs.join(String.fromCharCode(10));
+                                errorDetailsElement.textContent = sanitizeDisplayText(data.logs.join(String.fromCharCode(10)));
                                 errorDetailsElement.style.display = 'block';
                             }
                         } else {
                             statusBox.className = 'result-status-box status-failed';
                             statusBox.innerText = '検証失敗: 信頼の連鎖が切れています';
                             if (data.logs && data.logs.length > 0) {
-                                errorDetailsElement.textContent = data.logs.join(String.fromCharCode(10));
+                                errorDetailsElement.textContent = sanitizeDisplayText(data.logs.join(String.fromCharCode(10)));
                                 errorDetailsElement.style.display = 'block';
                             }
                         }
@@ -1398,7 +1455,7 @@ app.get('/', (req, res) => {
                 } catch(e) {
                     statusBox.className = 'result-status-box status-failed';
                     statusBox.innerText = '通信エラーが発生しました';
-                    errorDetailsElement.textContent = '詳細: ' + (e && e.message ? e.message : String(e));
+                    errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (e && e.message ? e.message : String(e)));
                     errorDetailsElement.style.display = 'block';
                     renderDiagram(emptyDiagram(domain));
                 }
