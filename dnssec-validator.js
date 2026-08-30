@@ -1249,23 +1249,11 @@ app.get('/', (req, res) => {
         </div>
 
         <script>
-            const domainInput = document.getElementById('domain');
-            const savedDomainKey = 'dnssec-validator-domain';
             const urlParams = new URLSearchParams(window.location.search);
             const domainFromUrl = urlParams.get('domain');
-
-            try {
-                domainInput.value = domainFromUrl || localStorage.getItem(savedDomainKey) || '';
-            } catch (e) {
-                domainInput.value = domainFromUrl || '';
+            if (domainFromUrl) {
+                document.getElementById('domain').value = domainFromUrl;
             }
-
-            domainInput.addEventListener('input', () => {
-                try {
-                    localStorage.setItem(savedDomainKey, domainInput.value);
-                } catch (e) {
-                }
-            });
 
             const dnssecAlgorithmNames = {
                 1: 'RSAMD5',
@@ -1278,6 +1266,28 @@ app.get('/', (req, res) => {
                 15: 'ED25519',
                 16: 'ED448'
             };
+
+            function normalizeUserDomain(value) {
+                const raw = String(value || '').trim();
+                if (!raw) return '';
+
+                try {
+                    const urlObj = new URL(raw.includes('://') ? raw : 'https://' + raw);
+                    const hostname = urlObj.hostname.replace(/\.$/, '').toLowerCase();
+                    if (!hostname || hostname.length > 253) return '';
+                    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(hostname)) {
+                        return '';
+                    }
+                    return hostname;
+                } catch (e) {
+                    const hostname = raw.replace(/^https?:\/\//i, '').replace(/\/$/, '').replace(/\.$/, '').toLowerCase();
+                    if (!hostname || hostname.length > 253) return '';
+                    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(hostname)) {
+                        return '';
+                    }
+                    return hostname;
+                }
+            }
 
             function algorithmText(algorithm) {
                 return 'alg ' + algorithm + ' (' + (dnssecAlgorithmNames[algorithm] || 'Unknown') + ')';
@@ -1334,7 +1344,7 @@ app.get('/', (req, res) => {
             async function validate(event) {
                 event.preventDefault();
 
-                let domain = domainInput.value.trim();
+                let domain = normalizeUserDomain(document.getElementById('domain').value);
                 const statusBox = document.getElementById('statusBox');
                 const errorDetailsElement = document.getElementById('validation-error-details');
                 const explanationTitle = document.getElementById('explanationTitle');
