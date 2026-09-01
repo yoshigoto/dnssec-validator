@@ -247,6 +247,8 @@ function queryDnsTcp(serverIp, buf) {
 async function getResourceRecord(domain, serverIp, rType) {
     let resourceRecords = [];
     let rrsigRecords = [];
+    let denialRecords = [];
+    let denialRrsigRecords = [];
 
     let buf = dnsPacket.encode({
         type: 'query',
@@ -273,7 +275,10 @@ async function getResourceRecord(domain, serverIp, rType) {
         rrsigRecords = res.answers.filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType);
     }
 
-    return { resourceRecords: resourceRecords, rrsigRecords: rrsigRecords };
+    const authorityRecords = res.authorities || [];
+    denialRecords = authorityRecords.filter(a => a.type === 'NSEC' || a.type === 'NSEC3');
+    denialRrsigRecords = authorityRecords.filter(a => a.type === 'RRSIG' && (a.data.typeCovered === 'NSEC' || a.data.typeCovered === 'NSEC3'));
+    return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords };
 }
 
 // --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
@@ -882,6 +887,59 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     };
 }
 
+function normalizeDnsName(name) {
+    return (name || '').toLowerCase().replace(/\.$/, '');
+}
+
+function nsec3Hash(domain, salt, iterations) {
+    let hash = crypto.createHash('sha1').update(encodeDomainNameCanonical(domain)).update(salt).digest();
+    for (let index = 0; index < iterations; index++) {
+        hash = crypto.createHash('sha1').update(hash).update(salt).digest();
+    }
+    return hash;
+}
+
+function toBase32Hex(buffer) {
+    const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUV';
+    let bits = 0;
+    let value = 0;
+    let result = '';
+    for (const byte of buffer) {
+        value = (value << 8) | byte;
+        bits += 8;
+        while (bits >= 5) {
+            result += alphabet[(value >>> (bits - 5)) & 31];
+            bits -= 5;
+        }
+    }
+    return bits > 0 ? result + alphabet[(value << (5 - bits)) & 31] : result;
+}
+
+function hashIsCovered(target, start, end) {
+    if (start < end) return target > start && target < end;
+    if (start > end) return target > start || target < end;
+    return target !== start;
+}
+
+function getDsDenialProof(domain, denialRecords) {
+    for (const record of denialRecords || []) {
+        if (record.type === 'NSEC' && normalizeDnsName(record.name) === normalizeDnsName(domain)) {
+            return { type: 'NSEC', covered: !record.data.rrtypes.includes('DS'), signed: false };
+        }
+        if (record.type === 'NSEC3' && record.data.algorithm === 1) {
+            const ownerHash = record.name.split('.')[0].toUpperCase();
+            const domainHash = toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations));
+            const nextHash = toBase32Hex(record.data.nextDomain);
+            const isExactMatchWithoutDs = ownerHash === domainHash && !record.data.rrtypes.includes('DS');
+            const isOptOutCover = (record.data.flags & 1) !== 0 && hashIsCovered(domainHash, ownerHash, nextHash);
+            if (isExactMatchWithoutDs || isOptOutCover) {
+                return { type: 'NSEC3', covered: true, signed: false };
+            }
+        }
+    }
+    return { type: '', covered: false, signed: false };
+}
+
 // --- メイン検証 API (入力バリデーション・レート制限強化版) ---
 app.post('/api/validate', async (req, res) => {
     let { domain } = req.body;
@@ -907,7 +965,7 @@ app.post('/api/validate', async (req, res) => {
     let logs = [];
     let success = false;
     const diagram = {
-        parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] },
+        parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsDenialProof: null },
         child: { name: domain, server: '', dnskey: [], rrsig: [] },
         checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
     };
@@ -948,6 +1006,9 @@ app.post('/api/validate', async (req, res) => {
         }
         
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
+            const proof = getDsDenialProof(zoneApexInfo.zoneApex, dsInfo ? dsInfo.denialRecords : []);
+            proof.signed = !!(dsInfo && dsInfo.denialRrsigRecords.length > 0);
+            diagram.parent.dsDenialProof = proof;
             try {
                 targetNs = zoneApexInfo.currentNs;
                 diagram.parent.server = targetNs;
@@ -959,6 +1020,9 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
+                const proof = getDsDenialProof(zoneApexInfo.zoneApex, dsInfo ? dsInfo.denialRecords : []);
+                proof.signed = !!(dsInfo && dsInfo.denialRrsigRecords.length > 0);
+                diagram.parent.dsDenialProof = proof;
                 return res.json({ success: false, logs: [...logs, '親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
@@ -968,6 +1032,7 @@ app.post('/api/validate', async (req, res) => {
         }
         
         const dsRecords = dsInfo.resourceRecords;
+        diagram.parent.dsDenialProof = { type: '', covered: false, signed: false, notRequired: true };
         diagram.parent.name = zoneApexInfo.zoneApex;
         diagram.parent.server = targetNs;
         diagram.child.name = zoneApexInfo.zoneApex;
