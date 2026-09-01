@@ -7,14 +7,14 @@ const crypto = require('crypto');
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json());
+app.use(express.json({ limit: '4kb', type: 'application/json' }));
 app.use((req, res, next) => {
     res.set({
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
         'Referrer-Policy': 'no-referrer',
         'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
-        'Content-Security-Policy': "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'"
+        'Content-Security-Policy': "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'"
     });
     next();
 });
@@ -1142,8 +1142,23 @@ app.post('/api/validate', async (req, res) => {
 });
 
 // --- UI (HTML) を返却するエンドポイント ---
+app.get('/dnssec-validator-client.js', (req, res) => {
+    res.sendFile(__dirname + '/dnssec-validator-client.js');
+});
+
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/index.html');
+});
+
+app.use((error, req, res, next) => {
+    if (error.type === 'entity.parse.failed') {
+        return res.status(400).json({ error: 'JSON リクエストの形式が無効です' });
+    }
+    if (error.type === 'entity.too.large') {
+        return res.status(413).json({ error: 'リクエスト本文が大きすぎます' });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'サーバー内部でエラーが発生しました' });
 });
 
 const PORT = 3002;
