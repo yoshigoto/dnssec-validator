@@ -42,7 +42,14 @@ const aRecordValidationText = validation => {
         return ['Aレコードが見つかりませんでした', 'NSEC/NSEC3 による不在証明は確認できませんでした'];
     }
     if (validation.signatures.length === 0) return ['Aレコードの RRSIG が見つかりませんでした'];
-    return validation.signatures.map(signature => 'RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> 署名検証: ' + (signature.verified ? '成功 ✓' : '失敗 ✕'));
+    const trustChain = validation.trustChain || {};
+    const kskKeyTags = trustChain.dsMatchedKskKeyTags || [];
+    const dnskeySignatures = trustChain.dnskeyRrsetSignatures || [];
+    const lines = [
+        'DS -> KSK: ' + (kskKeyTags.length ? 'Key Tag ' + kskKeyTags.join(', ') + ' が一致 ✓' : '一致する KSK なし ✕'),
+        'KSK -> DNSKEY RRset: ' + (dnskeySignatures.length ? dnskeySignatures.map(signature => 'Key Tag ' + signature.kskKeyTag).join(', ') + ' による署名検証: 成功 ✓' : 'DS一致 KSK による署名検証: 失敗 ✕')
+    ];
+    return lines.concat(validation.signatures.map(signature => 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + (signature.trustChainVerified ? '信頼の連鎖: 成功 ✓' : '信頼の連鎖: 失敗 ✕')));
 };
 
 function setNodeContent(nodeId, title, titleColor, lines) {

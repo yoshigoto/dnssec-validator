@@ -1250,22 +1250,52 @@ app.post('/api/validate', async (req, res) => {
             logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
         }
 
+        // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
+        const dsMatchedKskRecords = [];
+        for (const ds of dsRecords) {
+            for (const key of dnskeyRecords) {
+                const result = verifyDnskeyWithDs(zoneApexInfo.zoneApex, key.data, ds.data);
+                if (result.match) {
+                    dsMatchedKskRecords.push(key);
+                } else if (result.reason && result.reason !== '') {
+                    logs.push(result.reason);
+                }
+            }
+        }
+        const matchFound = dsMatchedKskRecords.length > 0;
+        diagram.checks.dsKeyMatch = matchFound;
+
         if (domain !== zoneApexInfo.zoneApex) {
-            const aRecordValidation = { queried: true, recordsFound: false, signatures: [] };
+            const aRecordValidation = { queried: true, recordsFound: false, signatures: [], trustChain: { dsMatchedKskKeyTags: [], dnskeyRrsetSignatures: [] } };
             diagram.child.aRecordValidation = aRecordValidation;
             try {
+                const dsMatchedKskKeyTags = dsMatchedKskRecords.map(key => calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)));
+                aRecordValidation.trustChain.dsMatchedKskKeyTags = [...new Set(dsMatchedKskKeyTags)];
+                for (const rrsig of dnskeyRrsig) {
+                    for (const ksk of dsMatchedKskRecords) {
+                        const kskKeyTag = calculateKeyTag(ksk.data.algorithm, buildDnskeyFullRdata(ksk.data));
+                        if (ksk.data.algorithm !== rrsig.data.algorithm || kskKeyTag !== rrsig.data.keyTag) continue;
+                        if (verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex).verified) {
+                            aRecordValidation.trustChain.dnskeyRrsetSignatures.push({ kskKeyTag, algorithm: rrsig.data.algorithm });
+                        }
+                    }
+                }
                 const aInfo = await getResourceRecord(domain, childIp, 'A');
                 aRecordValidation.recordsFound = aInfo.resourceRecords.length > 0;
                 for (const rrsig of aInfo.rrsigRecords) {
                     let verified = false;
+                    let zskKeyTag = null;
                     for (const key of dnskeyRecords) {
                         const result = verifyARecordRrsig(aInfo.resourceRecords, rrsig, key, domain);
                         if (result.verified) {
                             verified = true;
+                            zskKeyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
                             break;
                         }
                     }
-                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified });
+                    const verifiedByZsk = dnskeyRecords.some(key => key.data.flags === 256 && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
+                    const dnskeyRrsetVerifiedByKsk = aRecordValidation.trustChain.dnskeyRrsetSignatures.length > 0;
+                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
                 if (!aRecordValidation.recordsFound) {
                     const denialRecord = aInfo.rcode === 'NOERROR' ? findARecordNodataProof(domain, aInfo.denialRecords) : findNxDomainProof(domain, aInfo.denialRecords);
@@ -1285,24 +1315,6 @@ app.post('/api/validate', async (req, res) => {
                 logs.push(`AレコードのDNSSEC検証に失敗しました: ${err.message}`);
             }
         }
-
-        // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
-        let matchFound = false;
-        let dsKeyTags = dsRecords.map(ds => ds.data.keyTag);
-        for (const ds of dsRecords) {
-            for (const key of dnskeyRecords) {
-                const result = verifyDnskeyWithDs(zoneApexInfo.zoneApex, key.data, ds.data);
-                if (result.match) {
-                    matchFound = true;
-                } else {
-                    if (result.reason && result.reason !== '') {
-                        logs.push(result.reason);
-                    }
-                }
-            }
-        }
-
-        diagram.checks.dsKeyMatch = matchFound;
 
         if (matchFound) {
             success = true;
