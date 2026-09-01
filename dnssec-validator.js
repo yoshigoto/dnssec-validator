@@ -247,8 +247,6 @@ function queryDnsTcp(serverIp, buf) {
 async function getResourceRecord(domain, serverIp, rType) {
     let resourceRecords = [];
     let rrsigRecords = [];
-    let denialRecords = [];
-    let denialRrsigRecords = [];
 
     let buf = dnsPacket.encode({
         type: 'query',
@@ -275,10 +273,7 @@ async function getResourceRecord(domain, serverIp, rType) {
         rrsigRecords = res.answers.filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType);
     }
 
-    const authorityRecords = res.authorities || [];
-    denialRecords = authorityRecords.filter(a => a.type === 'NSEC' || a.type === 'NSEC3');
-    denialRrsigRecords = authorityRecords.filter(a => a.type === 'RRSIG' && (a.data.typeCovered === 'NSEC' || a.data.typeCovered === 'NSEC3'));
-    return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords };
+    return { resourceRecords, rrsigRecords };
 }
 
 // --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
@@ -887,57 +882,38 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     };
 }
 
-function normalizeDnsName(name) {
-    return (name || '').toLowerCase().replace(/\.$/, '');
-}
+function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
+    const expirationCheck = checkSignatureExpiration(rrsig);
+    if (!expirationCheck.valid) return { verified: false, reason: expirationCheck.reason };
+    const keyTag = calculateKeyTag(dnskeyRecord.data.algorithm, buildDnskeyFullRdata(dnskeyRecord.data));
+    if (keyTag !== rrsig.data.keyTag || dnskeyRecord.data.algorithm !== rrsig.data.algorithm) return { verified: false, reason: '' };
 
-function nsec3Hash(domain, salt, iterations) {
-    let hash = crypto.createHash('sha1').update(encodeDomainNameCanonical(domain)).update(salt).digest();
-    for (let index = 0; index < iterations; index++) {
-        hash = crypto.createHash('sha1').update(hash).update(salt).digest();
-    }
-    return hash;
-}
-
-function toBase32Hex(buffer) {
-    const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUV';
-    let bits = 0;
-    let value = 0;
-    let result = '';
-    for (const byte of buffer) {
-        value = (value << 8) | byte;
-        bits += 8;
-        while (bits >= 5) {
-            result += alphabet[(value >>> (bits - 5)) & 31];
-            bits -= 5;
-        }
-    }
-    return bits > 0 ? result + alphabet[(value << (5 - bits)) & 31] : result;
-}
-
-function hashIsCovered(target, start, end) {
-    if (start < end) return target > start && target < end;
-    if (start > end) return target > start || target < end;
-    return target !== start;
-}
-
-function getDsDenialProof(domain, denialRecords) {
-    for (const record of denialRecords || []) {
-        if (record.type === 'NSEC' && normalizeDnsName(record.name) === normalizeDnsName(domain)) {
-            return { type: 'NSEC', covered: !record.data.rrtypes.includes('DS'), signed: false };
-        }
-        if (record.type === 'NSEC3' && record.data.algorithm === 1) {
-            const ownerHash = record.name.split('.')[0].toUpperCase();
-            const domainHash = toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations));
-            const nextHash = toBase32Hex(record.data.nextDomain);
-            const isExactMatchWithoutDs = ownerHash === domainHash && !record.data.rrtypes.includes('DS');
-            const isOptOutCover = (record.data.flags & 1) !== 0 && hashIsCovered(domainHash, ownerHash, nextHash);
-            if (isExactMatchWithoutDs || isOptOutCover) {
-                return { type: 'NSEC3', covered: true, signed: false };
-            }
-        }
-    }
-    return { type: '', covered: false, signed: false };
+    const rrsigHeader = Buffer.alloc(18);
+    rrsigHeader.writeUInt16BE(dnsTypes.toType('A'), 0);
+    rrsigHeader.writeUInt8(rrsig.data.algorithm, 2);
+    rrsigHeader.writeUInt8(rrsig.data.labels, 3);
+    rrsigHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+    rrsigHeader.writeUInt32BE(rrsig.data.expiration, 8);
+    rrsigHeader.writeUInt32BE(rrsig.data.inception, 12);
+    rrsigHeader.writeUInt16BE(rrsig.data.keyTag, 16);
+    const ownerName = encodeDomainNameCanonical(domain);
+    const rdataList = aRecords.map(record => dnsPacket.record('A').encode(record.data).subarray(2)).sort(Buffer.compare);
+    const rrWireRecords = rdataList.map(rdata => {
+        const header = Buffer.alloc(10);
+        header.writeUInt16BE(dnsTypes.toType('A'), 0);
+        header.writeUInt16BE(1, 2);
+        header.writeUInt32BE(rrsig.data.originalTTL, 4);
+        header.writeUInt16BE(rdata.length, 8);
+        return Buffer.concat([ownerName, header, rdata]);
+    });
+    const message = Buffer.concat([rrsigHeader, encodeDomainNameCanonical(rrsig.data.signersName || domain), ...rrWireRecords]);
+    const signature = rrsig.data.signature;
+    const publicKey = getDnskeyRawKey(dnskeyRecord.data);
+    if (!signature || !publicKey) return { verified: false, reason: 'Aレコード署名の検証データを取得できません' };
+    if ([5, 7, 8, 10].includes(dnskeyRecord.data.algorithm)) return verifyRSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    if ([13, 14].includes(dnskeyRecord.data.algorithm)) return verifyECDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    if ([15, 16].includes(dnskeyRecord.data.algorithm)) return verifyEdDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
 
 // --- メイン検証 API (入力バリデーション・レート制限強化版) ---
@@ -965,8 +941,8 @@ app.post('/api/validate', async (req, res) => {
     let logs = [];
     let success = false;
     const diagram = {
-        parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsDenialProof: null },
-        child: { name: domain, server: '', dnskey: [], rrsig: [] },
+        parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] },
+        child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null },
         checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
     };
 
@@ -1006,9 +982,6 @@ app.post('/api/validate', async (req, res) => {
         }
         
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-            const proof = getDsDenialProof(zoneApexInfo.zoneApex, dsInfo ? dsInfo.denialRecords : []);
-            proof.signed = !!(dsInfo && dsInfo.denialRrsigRecords.length > 0);
-            diagram.parent.dsDenialProof = proof;
             try {
                 targetNs = zoneApexInfo.currentNs;
                 diagram.parent.server = targetNs;
@@ -1020,9 +993,6 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-                const proof = getDsDenialProof(zoneApexInfo.zoneApex, dsInfo ? dsInfo.denialRecords : []);
-                proof.signed = !!(dsInfo && dsInfo.denialRrsigRecords.length > 0);
-                diagram.parent.dsDenialProof = proof;
                 return res.json({ success: false, logs: [...logs, '親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
@@ -1032,7 +1002,6 @@ app.post('/api/validate', async (req, res) => {
         }
         
         const dsRecords = dsInfo.resourceRecords;
-        diagram.parent.dsDenialProof = { type: '', covered: false, signed: false, notRequired: true };
         diagram.parent.name = zoneApexInfo.zoneApex;
         diagram.parent.server = targetNs;
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -1171,6 +1140,29 @@ app.post('/api/validate', async (req, res) => {
             }
         } else {
             logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
+        }
+
+        if (domain !== zoneApexInfo.zoneApex) {
+            const aRecordValidation = { queried: true, recordsFound: false, signatures: [] };
+            diagram.child.aRecordValidation = aRecordValidation;
+            try {
+                const aInfo = await getResourceRecord(domain, childIp, 'A');
+                aRecordValidation.recordsFound = aInfo.resourceRecords.length > 0;
+                for (const rrsig of aInfo.rrsigRecords) {
+                    let verified = false;
+                    for (const key of dnskeyRecords) {
+                        const result = verifyARecordRrsig(aInfo.resourceRecords, rrsig, key, domain);
+                        if (result.verified) {
+                            verified = true;
+                            break;
+                        }
+                    }
+                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified });
+                }
+            } catch (err) {
+                aRecordValidation.error = err.message;
+                logs.push(`AレコードのDNSSEC検証に失敗しました: ${err.message}`);
+            }
         }
 
         // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）

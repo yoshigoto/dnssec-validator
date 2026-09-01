@@ -30,11 +30,7 @@ const algorithmText = algorithm => 'alg ' + algorithm + ' (' + (dnssecAlgorithmN
 const keyText = (records, role) => !records || records.length === 0 ? [role + ': 取得できませんでした'] : records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm));
 const dsText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest);
 const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証'));
-const dsDenialProofText = proof => {
-    if (proof && proof.notRequired) return ['DSレコードあり（不在証明は不要）'];
-    if (proof && proof.covered) return [proof.type + ' により DS 不在を証明 ✓', 'NSEC/NSEC3 の RRSIG: ' + (proof.signed ? '取得済み' : '未取得')];
-    return ['DS をカバーする NSEC/NSEC3 は確認できませんでした'];
-};
+const aRecordValidationText = validation => !validation || !validation.queried ? ['入力名はゾーン頂点です（検証不要）'] : validation.error ? ['検証できませんでした: ' + validation.error] : !validation.recordsFound ? ['Aレコードが見つかりませんでした'] : validation.signatures.length === 0 ? ['Aレコードの RRSIG が見つかりませんでした'] : validation.signatures.map(signature => 'RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> 署名検証: ' + (signature.verified ? '成功 ✓' : '失敗 ✕'));
 
 function setNodeContent(nodeId, title, titleColor, lines) {
     const node = document.getElementById(nodeId);
@@ -63,7 +59,7 @@ function setNodeContent(nodeId, title, titleColor, lines) {
 }
 
 function emptyDiagram(domain) {
-    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsDenialProof: null }, child: { name: domain, server: '', dnskey: [], rrsig: [] }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false } };
+    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false } };
 }
 
 function renderDiagram(diagram) {
@@ -74,10 +70,10 @@ function renderDiagram(diagram) {
     document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
     setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵 (ZSKの秘密鍵はゾーンの RRset への署名に使われる)']);
     setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
-    setNodeContent('parentDsDenialProof', 'DS 不在証明', '', dsDenialProofText(diagram.parent.dsDenialProof));
     setNodeContent('parentDs', 'DS', 'blue', [...dsText(diagram.parent.ds), '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)']);
     setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
+    setNodeContent('childARecordValidation', 'Aレコード DNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
     const chainArrow = document.getElementById('chainArrow');
     chainArrow.className = 'arrow chain-arrow ' + (diagram.checks.dsKeyMatch ? 'good' : 'bad');
     chainArrow.replaceChildren();
