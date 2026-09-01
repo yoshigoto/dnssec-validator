@@ -247,6 +247,8 @@ function queryDnsTcp(serverIp, buf) {
 async function getResourceRecord(domain, serverIp, rType) {
     let resourceRecords = [];
     let rrsigRecords = [];
+    let denialRecords = [];
+    let denialRrsigRecords = [];
 
     let buf = dnsPacket.encode({
         type: 'query',
@@ -273,7 +275,10 @@ async function getResourceRecord(domain, serverIp, rType) {
         rrsigRecords = res.answers.filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType);
     }
 
-    return { resourceRecords, rrsigRecords };
+    const authorityRecords = res.authorities || [];
+    denialRecords = authorityRecords.filter(record => record.type === 'NSEC' || record.type === 'NSEC3');
+    denialRrsigRecords = authorityRecords.filter(record => record.type === 'RRSIG' && (record.data.typeCovered === 'NSEC' || record.data.typeCovered === 'NSEC3'));
+    return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
 // --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
@@ -916,6 +921,109 @@ function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
     return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
 
+function verifyDenialRecordRrsig(record, rrsig, dnskeyRecord) {
+    const expirationCheck = checkSignatureExpiration(rrsig);
+    if (!expirationCheck.valid) return { verified: false, reason: expirationCheck.reason };
+    const keyTag = calculateKeyTag(dnskeyRecord.data.algorithm, buildDnskeyFullRdata(dnskeyRecord.data));
+    if (keyTag !== rrsig.data.keyTag || dnskeyRecord.data.algorithm !== rrsig.data.algorithm) return { verified: false, reason: '' };
+
+    const typeCovered = rrsig.data.typeCovered;
+    const rrsigHeader = Buffer.alloc(18);
+    rrsigHeader.writeUInt16BE(dnsTypes.toType(typeCovered), 0);
+    rrsigHeader.writeUInt8(rrsig.data.algorithm, 2);
+    rrsigHeader.writeUInt8(rrsig.data.labels, 3);
+    rrsigHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+    rrsigHeader.writeUInt32BE(rrsig.data.expiration, 8);
+    rrsigHeader.writeUInt32BE(rrsig.data.inception, 12);
+    rrsigHeader.writeUInt16BE(rrsig.data.keyTag, 16);
+    const rdata = dnsPacket.record(typeCovered).encode(record.data).subarray(2);
+    const recordHeader = Buffer.alloc(10);
+    recordHeader.writeUInt16BE(dnsTypes.toType(typeCovered), 0);
+    recordHeader.writeUInt16BE(1, 2);
+    recordHeader.writeUInt32BE(rrsig.data.originalTTL, 4);
+    recordHeader.writeUInt16BE(rdata.length, 8);
+    const message = Buffer.concat([rrsigHeader, encodeDomainNameCanonical(rrsig.data.signersName || record.name), encodeDomainNameCanonical(record.name), recordHeader, rdata]);
+    const signature = rrsig.data.signature;
+    const publicKey = getDnskeyRawKey(dnskeyRecord.data);
+    if (!signature || !publicKey) return { verified: false, reason: '不在証明の署名データを取得できません' };
+    if ([5, 7, 8, 10].includes(dnskeyRecord.data.algorithm)) return verifyRSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    if ([13, 14].includes(dnskeyRecord.data.algorithm)) return verifyECDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    if ([15, 16].includes(dnskeyRecord.data.algorithm)) return verifyEdDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
+}
+
+function normalizeDnsName(name) {
+    return (name || '').toLowerCase().replace(/\.$/, '');
+}
+
+function compareDnsNames(left, right) {
+    const leftLabels = normalizeDnsName(left).split('.').reverse();
+    const rightLabels = normalizeDnsName(right).split('.').reverse();
+    for (let index = 0; index < Math.min(leftLabels.length, rightLabels.length); index++) {
+        if (leftLabels[index] < rightLabels[index]) return -1;
+        if (leftLabels[index] > rightLabels[index]) return 1;
+    }
+    return leftLabels.length - rightLabels.length;
+}
+
+function valueIsCovered(target, start, end) {
+    if (start < end) return target > start && target < end;
+    if (start > end) return target > start || target < end;
+    return target !== start;
+}
+
+function dnsNameIsCovered(target, start, end) {
+    const startToEnd = compareDnsNames(start, end);
+    const targetToStart = compareDnsNames(target, start);
+    const targetToEnd = compareDnsNames(target, end);
+    if (startToEnd < 0) return targetToStart > 0 && targetToEnd < 0;
+    if (startToEnd > 0) return targetToStart > 0 || targetToEnd < 0;
+    return targetToStart !== 0;
+}
+
+function nsec3Hash(domain, salt, iterations) {
+    let hash = crypto.createHash('sha1').update(encodeDomainNameCanonical(domain)).update(salt).digest();
+    for (let index = 0; index < iterations; index++) hash = crypto.createHash('sha1').update(hash).update(salt).digest();
+    return hash;
+}
+
+function toBase32Hex(buffer) {
+    const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUV';
+    let bits = 0;
+    let value = 0;
+    let result = '';
+    for (const byte of buffer) {
+        value = (value << 8) | byte;
+        bits += 8;
+        while (bits >= 5) {
+            result += alphabet[(value >>> (bits - 5)) & 31];
+            bits -= 5;
+        }
+    }
+    return bits > 0 ? result + alphabet[(value << (5 - bits)) & 31] : result;
+}
+
+function findARecordNodataProof(domain, denialRecords) {
+    for (const record of denialRecords) {
+        if (record.type === 'NSEC' && normalizeDnsName(record.name) === normalizeDnsName(domain) && !record.data.rrtypes.includes('A')) return record;
+        if (record.type === 'NSEC3' && record.data.algorithm === 1 && record.name.split('.')[0].toUpperCase() === toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations)) && !record.data.rrtypes.includes('A')) return record;
+    }
+    return null;
+}
+
+function findNxDomainProof(domain, denialRecords) {
+    for (const record of denialRecords) {
+        if (record.type === 'NSEC' && dnsNameIsCovered(domain, record.name, record.data.nextDomain)) return record;
+        if (record.type === 'NSEC3' && record.data.algorithm === 1) {
+            const domainHash = toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations));
+            const ownerHash = record.name.split('.')[0].toUpperCase();
+            const nextHash = toBase32Hex(record.data.nextDomain);
+            if (valueIsCovered(domainHash, ownerHash, nextHash)) return record;
+        }
+    }
+    return null;
+}
+
 // --- メイン検証 API (入力バリデーション・レート制限強化版) ---
 app.post('/api/validate', async (req, res) => {
     let { domain } = req.body;
@@ -1158,6 +1266,19 @@ app.post('/api/validate', async (req, res) => {
                         }
                     }
                     aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified });
+                }
+                if (!aRecordValidation.recordsFound) {
+                    const denialRecord = aInfo.rcode === 'NOERROR' ? findARecordNodataProof(domain, aInfo.denialRecords) : findNxDomainProof(domain, aInfo.denialRecords);
+                    const denialProof = { rcode: aInfo.rcode, type: denialRecord ? denialRecord.type : '', verified: false };
+                    aRecordValidation.denialProof = denialProof;
+                    if (denialRecord) {
+                        const signature = aInfo.denialRrsigRecords.find(candidate => candidate.data.typeCovered === denialRecord.type && normalizeDnsName(candidate.name) === normalizeDnsName(denialRecord.name));
+                        if (signature) {
+                            denialProof.keyTag = signature.data.keyTag;
+                            denialProof.algorithm = signature.data.algorithm;
+                            denialProof.verified = dnskeyRecords.some(key => verifyDenialRecordRrsig(denialRecord, signature, key).verified);
+                        }
+                    }
                 }
             } catch (err) {
                 aRecordValidation.error = err.message;

@@ -30,7 +30,20 @@ const algorithmText = algorithm => 'alg ' + algorithm + ' (' + (dnssecAlgorithmN
 const keyText = (records, role) => !records || records.length === 0 ? [role + ': 取得できませんでした'] : records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm));
 const dsText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest);
 const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証'));
-const aRecordValidationText = validation => !validation || !validation.queried ? ['入力名はゾーン頂点です（検証不要）'] : validation.error ? ['検証できませんでした: ' + validation.error] : !validation.recordsFound ? ['Aレコードが見つかりませんでした'] : validation.signatures.length === 0 ? ['Aレコードの RRSIG が見つかりませんでした'] : validation.signatures.map(signature => 'RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> 署名検証: ' + (signature.verified ? '成功 ✓' : '失敗 ✕'));
+const aRecordValidationText = validation => {
+    if (!validation || !validation.queried) return ['入力名はゾーン頂点です（検証不要）'];
+    if (validation.error) return ['検証できませんでした: ' + validation.error];
+    if (!validation.recordsFound) {
+        const proof = validation.denialProof;
+        if (proof && proof.type) {
+            const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : 'Aレコード不在';
+            return [proof.type + ' による ' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), proof.keyTag ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) : '対応する RRSIG が見つかりませんでした'];
+        }
+        return ['Aレコードが見つかりませんでした', 'NSEC/NSEC3 による不在証明は確認できませんでした'];
+    }
+    if (validation.signatures.length === 0) return ['Aレコードの RRSIG が見つかりませんでした'];
+    return validation.signatures.map(signature => 'RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> 署名検証: ' + (signature.verified ? '成功 ✓' : '失敗 ✕'));
+};
 
 function setNodeContent(nodeId, title, titleColor, lines) {
     const node = document.getElementById(nodeId);
