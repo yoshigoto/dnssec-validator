@@ -86,7 +86,7 @@ async function validate(event) {
     errorDetailsElement.textContent = '';
     renderDiagram(emptyDiagram(domain));
     try {
-        const response = await fetch('/api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) });
+        const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) });
         const data = await response.json();
         if (data.error) {
             statusBox.className = 'result-status-box status-failed';
