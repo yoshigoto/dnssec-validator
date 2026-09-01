@@ -42,7 +42,17 @@ function setNodeContent(nodeId, title, titleColor, lines) {
     metaElement.className = 'node-meta';
     sanitizeDisplayLines(lines).forEach((line, index) => {
         if (index > 0) metaElement.appendChild(document.createElement('br'));
-        metaElement.appendChild(document.createTextNode(line));
+        const failedLabel = '失敗 ✕';
+        const failedLabelIndex = line.indexOf(failedLabel);
+        if (failedLabelIndex === -1) {
+            metaElement.appendChild(document.createTextNode(line));
+            return;
+        }
+        metaElement.appendChild(document.createTextNode(line.slice(0, failedLabelIndex)));
+        const failedElement = document.createElement('span');
+        failedElement.className = 'signature-failed';
+        failedElement.textContent = failedLabel;
+        metaElement.append(failedElement, document.createTextNode(line.slice(failedLabelIndex + failedLabel.length)));
     });
     node.append(titleElement, metaElement);
 }
