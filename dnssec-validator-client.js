@@ -5,8 +5,8 @@ const MAX_DISPLAY_TEXT_LENGTH = 2000;
 
 function sanitizeDisplayText(value) {
     const text = (value === null || value === undefined ? '' : String(value))
-        .replace(/[\u0000-\u001F\u007F]+/g, ' ')
-        .replace(/\s+/g, ' ')
+        .replace(/[\u0000-\u0009\u000B-\u001F\u007F]+/g, ' ')
+        .replace(/[^\S\r\n]+/g, ' ')
         .trim();
     return text.slice(0, MAX_DISPLAY_TEXT_LENGTH);
 }
