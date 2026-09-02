@@ -98,7 +98,7 @@ function renderDiagram(diagram) {
     setNodeContent('parentDs', 'DS', 'blue', [...dsText(diagram.parent.ds), '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)']);
     setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
-    setNodeContent('childARecordValidation', 'Aレコード DNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
+    setNodeContent('childARecordValidation', '参考：ドメイン名に対する Aレコード DNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
     const chainArrow = document.getElementById('chainArrow');
     chainArrow.className = 'arrow chain-arrow ' + (diagram.checks.dsKeyMatch ? 'good' : 'bad');
     chainArrow.replaceChildren();
