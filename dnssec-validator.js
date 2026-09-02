@@ -1013,15 +1013,47 @@ function findARecordNodataProof(domain, denialRecords) {
 
 function findNxDomainProof(domain, denialRecords) {
     for (const record of denialRecords) {
-        if (record.type === 'NSEC' && dnsNameIsCovered(domain, record.name, record.data.nextDomain)) return record;
-        if (record.type === 'NSEC3' && record.data.algorithm === 1) {
-            const domainHash = toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations));
-            const ownerHash = record.name.split('.')[0].toUpperCase();
-            const nextHash = toBase32Hex(record.data.nextDomain);
-            if (valueIsCovered(domainHash, ownerHash, nextHash)) return record;
+        if (record.type === 'NSEC' && dnsNameIsCovered(domain, record.name, record.data.nextDomain)) return { records: [record], diagnostics: [] };
+    }
+
+    const nsec3Records = denialRecords.filter(record => record.type === 'NSEC3' && record.data.algorithm === 1);
+    const observedNsec3 = nsec3Records.map(record => ({
+        ownerHash: record.name.split('.')[0].toUpperCase(),
+        nextHash: toBase32Hex(record.data.nextDomain),
+        iterations: record.data.iterations,
+        salt: record.data.salt.toString('hex').toUpperCase() || '-'
+    }));
+    if (nsec3Records.length === 0) {
+        return { records: [], diagnostics: ['権威サーバーの応答に NSEC/NSEC3 レコードがありません'], observedNsec3 };
+    }
+
+    const labels = normalizeDnsName(domain).split('.');
+    for (let closestEncloserIndex = 1; closestEncloserIndex < labels.length; closestEncloserIndex++) {
+        const closestEncloser = labels.slice(closestEncloserIndex).join('.');
+        const nextCloser = labels.slice(closestEncloserIndex - 1).join('.');
+        const wildcard = `*.${closestEncloser}`;
+        for (const closestEncloserRecord of nsec3Records) {
+            const { salt, iterations } = closestEncloserRecord.data;
+            const closestEncloserHash = toBase32Hex(nsec3Hash(closestEncloser, salt, iterations));
+            if (closestEncloserRecord.name.split('.')[0].toUpperCase() !== closestEncloserHash) continue;
+
+            const coversName = (record, name) => {
+                const ownerHash = record.name.split('.')[0].toUpperCase();
+                const nextHash = toBase32Hex(record.data.nextDomain);
+                const nameHash = toBase32Hex(nsec3Hash(name, salt, iterations));
+                return valueIsCovered(nameHash, ownerHash, nextHash);
+            };
+            const nextCloserRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, nextCloser));
+            const wildcardRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, wildcard));
+            if (nextCloserRecord && wildcardRecord) return { records: [closestEncloserRecord, nextCloserRecord, wildcardRecord], diagnostics: [], observedNsec3 };
+            const missing = [];
+            if (!nextCloserRecord) missing.push(`next closer (${nextCloser}) をカバーする NSEC3`);
+            if (!wildcardRecord) missing.push(`ワイルドカード (${wildcard}) をカバーする NSEC3`);
+            return { records: [], diagnostics: [`closest encloser: ${closestEncloser}`, `不足: ${missing.join('、')}`], observedNsec3 };
         }
     }
-    return null;
+    const candidates = labels.slice(1).map((label, index) => labels.slice(index + 1).join('.'));
+    return { records: [], diagnostics: [`closest encloser の存在を示す NSEC3 がありません: ${candidates.join(', ')}`], observedNsec3 };
 }
 
 // --- メイン検証 API (入力バリデーション・レート制限強化版) ---
@@ -1298,16 +1330,21 @@ app.post('/api/validate', async (req, res) => {
                     aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
                 if (!aRecordValidation.recordsFound) {
-                    const denialRecord = aInfo.rcode === 'NOERROR' ? findARecordNodataProof(domain, aInfo.denialRecords) : findNxDomainProof(domain, aInfo.denialRecords);
-                    const denialProof = { rcode: aInfo.rcode, type: denialRecord ? denialRecord.type : '', verified: false };
+                    const nxDomainProof = aInfo.rcode === 'NXDOMAIN' ? findNxDomainProof(domain, aInfo.denialRecords) : null;
+                    const denialRecord = nxDomainProof ? null : findARecordNodataProof(domain, aInfo.denialRecords);
+                    const denialRecords = nxDomainProof ? nxDomainProof.records : denialRecord ? [denialRecord] : [];
+                    const denialProof = { rcode: aInfo.rcode, type: denialRecords.length > 0 ? denialRecords[0].type : '', verified: false };
+                    if (nxDomainProof) {
+                        denialProof.diagnostics = nxDomainProof.diagnostics;
+                        denialProof.observedNsec3 = nxDomainProof.observedNsec3;
+                    }
                     aRecordValidation.denialProof = denialProof;
-                    if (denialRecord) {
-                        const signature = aInfo.denialRrsigRecords.find(candidate => candidate.data.typeCovered === denialRecord.type && normalizeDnsName(candidate.name) === normalizeDnsName(denialRecord.name));
-                        if (signature) {
-                            denialProof.keyTag = signature.data.keyTag;
-                            denialProof.algorithm = signature.data.algorithm;
-                            denialProof.verified = dnskeyRecords.some(key => verifyDenialRecordRrsig(denialRecord, signature, key).verified);
-                        }
+                    if (denialRecords.length > 0) {
+                        denialProof.records = denialRecords.map(record => ({ name: record.name, type: record.type }));
+                        denialProof.verified = denialRecords.every(record => {
+                            const signature = aInfo.denialRrsigRecords.find(candidate => candidate.data.typeCovered === record.type && normalizeDnsName(candidate.name) === normalizeDnsName(record.name));
+                            return signature && dnskeyRecords.some(key => verifyDenialRecordRrsig(record, signature, key).verified);
+                        });
                     }
                 }
             } catch (err) {
