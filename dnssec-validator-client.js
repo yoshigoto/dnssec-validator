@@ -44,9 +44,9 @@ const aRecordValidationText = validation => {
         const observedNsec3 = proof && proof.observedNsec3 ? proof.observedNsec3 : [];
         const nsecLines = observedNsec.map(record => '応答 NSEC: ' + record.name + ' -> ' + record.nextDomain);
         const nsec3Lines = observedNsec3.map(record => '応答 NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
-        return ['Aレコードが見つかりませんでした', 'NSEC/NSEC3 による不在証明は確認できませんでした'].concat(diagnostics, nsecLines, nsec3Lines);
+        return ['Aレコードの探索: 失敗 ✕', 'NSEC/NSEC3 による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
     }
-    if (validation.signatures.length === 0) return ['Aレコードの RRSIG が見つかりませんでした'];
+    if (validation.signatures.length === 0) return ['Aレコードへの RRSIG の探索: 失敗 ✕'];
     const trustChain = validation.trustChain || {};
     const kskKeyTags = trustChain.dsMatchedKskKeyTags || [];
     const dnskeySignatures = trustChain.dnskeyRrsetSignatures || [];
