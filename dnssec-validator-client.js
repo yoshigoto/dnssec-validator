@@ -40,9 +40,11 @@ const aRecordValidationText = validation => {
             return [proof.type + ' による ' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), proof.keyTag ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) : '対応する RRSIG が見つかりませんでした'];
         }
         const diagnostics = proof && proof.diagnostics ? proof.diagnostics : [];
+        const observedNsec = proof && proof.observedNsec ? proof.observedNsec : [];
         const observedNsec3 = proof && proof.observedNsec3 ? proof.observedNsec3 : [];
+        const nsecLines = observedNsec.map(record => '応答 NSEC: ' + record.name + ' -> ' + record.nextDomain);
         const nsec3Lines = observedNsec3.map(record => '応答 NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
-        return ['Aレコードが見つかりませんでした', 'NSEC/NSEC3 による不在証明は確認できませんでした'].concat(diagnostics, nsec3Lines);
+        return ['Aレコードが見つかりませんでした', 'NSEC/NSEC3 による不在証明は確認できませんでした'].concat(diagnostics, nsecLines, nsec3Lines);
     }
     if (validation.signatures.length === 0) return ['Aレコードの RRSIG が見つかりませんでした'];
     const trustChain = validation.trustChain || {};

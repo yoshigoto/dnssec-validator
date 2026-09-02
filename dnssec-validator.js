@@ -1012,8 +1012,25 @@ function findARecordNodataProof(domain, denialRecords) {
 }
 
 function findNxDomainProof(domain, denialRecords) {
-    for (const record of denialRecords) {
-        if (record.type === 'NSEC' && dnsNameIsCovered(domain, record.name, record.data.nextDomain)) return { records: [record], diagnostics: [] };
+    const nsecRecords = denialRecords.filter(record => record.type === 'NSEC');
+    const labels = normalizeDnsName(domain).split('.');
+    const closestEncloserCandidates = labels.slice(1).map((label, index) => labels.slice(index + 1).join('.'));
+    const observedNsec = nsecRecords.map(record => ({ name: record.name, nextDomain: record.data.nextDomain }));
+    for (const closestEncloser of closestEncloserCandidates) {
+        const closestEncloserRecord = nsecRecords.find(record => normalizeDnsName(record.name) === closestEncloser);
+        if (!closestEncloserRecord) continue;
+        const nextCloser = `${labels[closestEncloserCandidates.indexOf(closestEncloser)]}.${closestEncloser}`;
+        const wildcard = `*.${closestEncloser}`;
+        const nextCloserRecord = nsecRecords.find(record => dnsNameIsCovered(nextCloser, record.name, record.data.nextDomain));
+        const wildcardRecord = nsecRecords.find(record => dnsNameIsCovered(wildcard, record.name, record.data.nextDomain));
+        if (nextCloserRecord && wildcardRecord) return { records: [closestEncloserRecord, nextCloserRecord, wildcardRecord], diagnostics: [], observedNsec };
+        const missing = [];
+        if (!nextCloserRecord) missing.push(`next closer (${nextCloser}) をカバーする NSEC`);
+        if (!wildcardRecord) missing.push(`ワイルドカード (${wildcard}) をカバーする NSEC`);
+        return { records: [], diagnostics: [`closest encloser: ${closestEncloser}`, `不足: ${missing.join('、')}`], observedNsec };
+    }
+    if (nsecRecords.length > 0) {
+        return { records: [], diagnostics: [`closest encloser の存在を示す NSEC がありません: ${closestEncloserCandidates.join(', ')}`], observedNsec };
     }
 
     const nsec3Records = denialRecords.filter(record => record.type === 'NSEC3' && record.data.algorithm === 1);
@@ -1027,7 +1044,6 @@ function findNxDomainProof(domain, denialRecords) {
         return { records: [], diagnostics: ['権威サーバーの応答に NSEC/NSEC3 レコードがありません'], observedNsec3 };
     }
 
-    const labels = normalizeDnsName(domain).split('.');
     for (let closestEncloserIndex = 1; closestEncloserIndex < labels.length; closestEncloserIndex++) {
         const closestEncloser = labels.slice(closestEncloserIndex).join('.');
         const nextCloser = labels.slice(closestEncloserIndex - 1).join('.');
@@ -1052,8 +1068,7 @@ function findNxDomainProof(domain, denialRecords) {
             return { records: [], diagnostics: [`closest encloser: ${closestEncloser}`, `不足: ${missing.join('、')}`], observedNsec3 };
         }
     }
-    const candidates = labels.slice(1).map((label, index) => labels.slice(index + 1).join('.'));
-    return { records: [], diagnostics: [`closest encloser の存在を示す NSEC3 がありません: ${candidates.join(', ')}`], observedNsec3 };
+    return { records: [], diagnostics: [`closest encloser の存在を示す NSEC3 がありません: ${closestEncloserCandidates.join(', ')}`], observedNsec3 };
 }
 
 // --- メイン検証 API (入力バリデーション・レート制限強化版) ---
@@ -1336,6 +1351,7 @@ app.post('/api/validate', async (req, res) => {
                     const denialProof = { rcode: aInfo.rcode, type: denialRecords.length > 0 ? denialRecords[0].type : '', verified: false };
                     if (nxDomainProof) {
                         denialProof.diagnostics = nxDomainProof.diagnostics;
+                        denialProof.observedNsec = nxDomainProof.observedNsec;
                         denialProof.observedNsec3 = nxDomainProof.observedNsec3;
                     }
                     aRecordValidation.denialProof = denialProof;
