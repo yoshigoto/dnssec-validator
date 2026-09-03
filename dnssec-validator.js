@@ -366,6 +366,17 @@ async function getZoneApex(domain) {
         let msg = await queryDnsUdp(currentNs, buf);
         let res = dnsPacket.decode(msg);
 
+        // EDNS0 を処理できない権威サーバーは FORMERR を返すため、OPT を外して一度だけ再試行する
+        if (res.rcode === 'FORMERR') {
+            buf = dnsPacket.encode({
+                type: 'query',
+                id: Math.floor(Math.random() * 65535),
+                questions: [{ type: 'SOA', name: domain }]
+            });
+            msg = await queryDnsUdp(currentNs, buf);
+            res = dnsPacket.decode(msg);
+        }
+
         if (res.flags & dnsPacket.TRUNCATED_RESPONSE) {
             buf = dnsPacket.streamEncode({
                 type: 'query',
