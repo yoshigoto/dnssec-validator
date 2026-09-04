@@ -92,6 +92,13 @@ function normalizeCacheKey(name) {
     return (name || '').toLowerCase().replace(/\.$/, '') || '.';
 }
 
+// グルーは委任先ゾーン内のネームサーバー名に限って信頼する。
+function isInBailiwick(name, zone) {
+    const normalizedName = normalizeCacheKey(name);
+    const normalizedZone = normalizeCacheKey(zone);
+    return normalizedName === normalizedZone || normalizedName.endsWith('.' + normalizedZone);
+}
+
 // --- ヘルパー関数: 委任情報 (ゾーン→ネームサーバー名/親ネームサーバー名) をキャッシュに記録 ---
 function cacheDelegation(zone, ns, parentNs, ttlSeconds) {
     if (!zone || !ns) return;
@@ -312,9 +319,11 @@ async function getARecord(domain) {
             if (nsAuthRecords.length === 0) {
                 throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
             }
-            // グルーレコード (additionals の A) を持つ NS を優先候補にし、残りはフォールバック候補として保持する (捨てない)
+            // 委任先ゾーン内のグルーレコードだけを優先候補にし、残りはフォールバック候補として保持する (捨てない)
             const candidates = nsAuthRecords.map(nsAuthRecord => {
-                const glueA = res.additionals.find(a => a.type === 'A' && a.name === nsAuthRecord.data);
+                const glueA = isInBailiwick(nsAuthRecord.data, nsAuthRecord.name)
+                    ? res.additionals.find(a => a.type === 'A' && a.name === nsAuthRecord.data)
+                    : null;
                 cacheDelegation(nsAuthRecord.name, nsAuthRecord.data, currentNs, nsAuthRecord.ttl);
                 if (glueA) {
                     cacheNameserverIp(nsAuthRecord.data, glueA.data, glueA.ttl);
@@ -437,11 +446,13 @@ async function getZoneApex(domain) {
         if (!isAuthoritative && authorities.length > 0) {
             const nsRecords = authorities.filter(r => r.type === 'NS');
             if (nsRecords.length > 0) {
-                // グルーレコード (additionals の A) を持つ NS を優先選択し、ホスト名解決による getARecord の循環参照を回避する
+                // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
                 for (const nsRecord of nsRecords) {
-                    const glueA = additionals.find(a => a.type === 'A' && a.name === nsRecord.data);
+                    const glueA = isInBailiwick(nsRecord.data, nsRecord.name)
+                        ? additionals.find(a => a.type === 'A' && a.name === nsRecord.data)
+                        : null;
                     if (glueA) {
                         chosenNsRecord = nsRecord;
                         chosenNsIp = glueA.data;
