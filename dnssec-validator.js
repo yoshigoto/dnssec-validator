@@ -281,7 +281,7 @@ async function getResourceRecord(domain, serverIp, rType) {
     return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
-// --- ヘルパー関数: Aレコードを取得する (エラーハンドリング強化版) ---
+// --- ヘルパー関数: Aレコードを取得する ---
 // ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
 async function getARecord(domain) {
     // domain が既に IP アドレスの場合は問い合わせ不要
@@ -346,7 +346,7 @@ async function getARecord(domain) {
     return ipAddress;
 }
 
-// --- ヘルパー関数: ゾーン頂点をルートから辿って取得する (エラーハンドリング強化版) ---
+// --- ヘルパー関数: ゾーン頂点をルートから辿って取得する ---
 async function getZoneApex(domain) {
     const cachedDelegation = findCachedDelegation(domain);
     const useCachedDelegation = cachedDelegation && isUsableCachedNs(cachedDelegation.ns, domain);
@@ -377,6 +377,7 @@ async function getZoneApex(domain) {
             res = dnsPacket.decode(msg);
         }
 
+        // TC (Truncated) フラグが立っている場合は TCP で再取得する
         if (res.flags & dnsPacket.TRUNCATED_RESPONSE) {
             buf = dnsPacket.streamEncode({
                 type: 'query',
@@ -463,7 +464,7 @@ async function getZoneApex(domain) {
 
 // --- ヘルパー関数: RRSIG署名の有効期限チェック ---
 function checkSignatureExpiration(rrsig) {
-    const now = Math.floor(Date.now() / 1000); // 現在時刻（秒）
+    const now = Math.floor(Date.now() / 1000); // 現在時刻 (秒)
     const expiration = rrsig.data.expiration;
     const inception = rrsig.data.inception;
     
@@ -550,7 +551,7 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
                 return { verified: false, reason: `未対応のECDSAアルゴリズム [${algorithm}]` };
         }
         
-        // DNSKEY の生の座標(X||Y)を JWK 形式に変換して公開鍵を生成
+        // DNSKEY の生の座標 (X||Y) を JWK 形式に変換して公開鍵を生成
         const x = publicKeyBuffer.subarray(0, coordLen);
         const y = publicKeyBuffer.subarray(coordLen, coordLen * 2);
         const publicKey = crypto.createPublicKey({
@@ -561,7 +562,7 @@ function verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
         const verifier = crypto.createVerify(hashAlgo.toUpperCase());
         verifier.update(messageBuffer);
         
-        // DNSSEC の署名は r||s の固定長(IEEE P1363)形式のため、そのまま検証可能
+        // DNSSEC の署名は r||s の固定長 (IEEE P1363) 形式のため、そのまま検証可能
         const verified = verifier.verify({ key: publicKey, dsaEncoding: 'ieee-p1363' }, signatureBuffer);
         
         return { 
@@ -606,7 +607,7 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
     }
 }
 
-// --- ヘルパー関数: ドメイン名をDNSワイヤーフォーマットに変換（正規化・非圧縮） ---
+// --- ヘルパー関数: ドメイン名を DNSワイヤーフォーマットに変換 (正規化・非圧縮) ---
 function encodeDomainNameCanonical(domain) {
     const labels = domain.replace(/\.$/, '').toLowerCase().split('.');
     let buf = Buffer.alloc(0);
@@ -633,8 +634,8 @@ function buildDnskeyFullRdata(dnskeyData) {
     return Buffer.concat([headerBuf, getDnskeyRawKey(dnskeyData)]);
 }
 
-// --- ヘルパー関数: RRSIG署名の検証（メイン関数） ---
-// rrset: 同じ Type Covered を持つ全リソースレコードの配列（RFC 4034 の署名対象RRset）
+// --- ヘルパー関数: RRSIG署名の検証 (メイン関数) ---
+// rrset: 同じ Type Covered を持つ全リソースレコードの配列 (RFC 4034 の署名対象RRset)
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     // 1. 署名の有効期限チェック
     const expirationCheck = checkSignatureExpiration(rrsig);
@@ -663,7 +664,7 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
         };
     }
     
-    // 5. RRSIG RDATA（署名フィールドを除く）をワイヤーフォーマットで構築 (RFC 4034 3.1.8.1)
+    // 5. RRSIG RDATA (署名フィールドを除く) をワイヤーフォーマットで構築 (RFC 4034 3.1.8.1)
     const signerNameBuf = encodeDomainNameCanonical(rrsig.data.signersName || domain);
     const rrsigRdataHeader = Buffer.alloc(18);
     rrsigRdataHeader.writeUInt16BE(dnsTypes.toType(rrsig.data.typeCovered), 0);
@@ -674,7 +675,7 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     rrsigRdataHeader.writeUInt32BE(rrsig.data.inception, 12);
     rrsigRdataHeader.writeUInt16BE(rrsig.data.keyTag, 16);
     
-    // 6. 署名対象RRset（全レコード）を RR ワイヤーフォーマットに変換し、正規順序 (RFC 4034 6.3) に並べ替え
+    // 6. 署名対象 RRset (全レコード) を RR ワイヤーフォーマットに変換し、正規順序 (RFC 4034 6.3) に並べ替え
     const ownerNameBuf = encodeDomainNameCanonical(domain);
     const typeCoveredNum = dnsTypes.toType(rrsig.data.typeCovered);
     const rdataList = (rrset && rrset.length > 0 ? rrset : [dnskeyRecord])
@@ -690,7 +691,7 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
         return Buffer.concat([ownerNameBuf, rrHeader, rdata]);
     });
     
-    // 7. メッセージ（署名対象）を構築 = RRSIG_RDATA + 正規順序のRRset
+    // 7. メッセージ (署名対象) を構築 = RRSIG_RDATA + 正規順序のRRset
     const messageBuffer = Buffer.concat([rrsigRdataHeader, signerNameBuf, ...rrWireBufs]);
     
     // 8. 公開鍵を抽出
@@ -816,7 +817,7 @@ function calculateKeyTag(algorithm, fullRdata) {
         return fullRdata.readUInt16BE(fullRdata.length - 3);
     }
 
-    // 2. RFC 4034 Appendix B. Key Tag Calculation（RSAMD5以外は全アルゴリズム共通・ビッグエンディアン）
+    // 2. RFC 4034 Appendix B. Key Tag Calculation (RSAMD5以外は全アルゴリズム共通・ビッグエンディアン)
     let ac = 0;
     for (let i = 0; i < fullRdata.length; i += 2) {
         let val = 0;
@@ -1131,7 +1132,7 @@ app.post('/api/validate', async (req, res) => {
             tempLog += `${zoneApexInfo.parentNs} または `;
         }
 
-        // 2. 親サーバーから DSレコードを取得 (エラーハンドリング強化版)
+        // 2. 親サーバーから DSレコードを取得
         let targetNs = zoneApexInfo.parentNs;
         let parentIp = '';
         let dsInfo = null;
@@ -1230,7 +1231,7 @@ app.post('/api/validate', async (req, res) => {
             }
         }
 
-        // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得 (エラーハンドリング強化版)
+        // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得
         let childIp = '';
         try {
             childIp = await getARecord(zoneApexInfo.currentNs);
@@ -1258,7 +1259,7 @@ app.post('/api/validate', async (req, res) => {
             algorithm: key.data.algorithm
         }));
         
-        // 3.5. DNSKEYレコード署名検証（オプション）
+        // 3.5. DNSKEYレコード署名検証 (オプション)
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
         diagram.child.rrsig = dnskeyRrsig.map(rrsig => ({
             keyTag: rrsig.data.keyTag,
@@ -1267,7 +1268,7 @@ app.post('/api/validate', async (req, res) => {
             verified: null
         }));
         if (dnskeyRrsig.length > 0) {
-            // DNSKEYレコード署名を検証（自己署名KSKで検証）
+            // DNSKEYレコード署名を検証 (自己署名KSKで検証)
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
             let verifiedKeyTag = new Array();
@@ -1308,7 +1309,7 @@ app.post('/api/validate', async (req, res) => {
             logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
         }
 
-        // 4. 信頼の連鎖を検証（DS と DNSKEY の突合）
+        // 4. 信頼の連鎖を検証 (DS と DNSKEY の突合)
         const dsMatchedKskRecords = [];
         for (const ds of dsRecords) {
             for (const key of dnskeyRecords) {
