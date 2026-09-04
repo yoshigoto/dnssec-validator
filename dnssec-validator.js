@@ -1405,7 +1405,7 @@ app.post('/api/validate', async (req, res) => {
                             break;
                         }
                     }
-                    const verifiedByZsk = dnskeyRecords.some(key => key.data.flags === 256 && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
+                    const verifiedByZsk = dnskeyRecords.some(key => (key.data.flags & 0x0100) !== 0 && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
                     const dnskeyRrsetVerifiedByKsk = aRecordValidation.trustChain.dnskeyRrsetSignatures.length > 0;
                     aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
