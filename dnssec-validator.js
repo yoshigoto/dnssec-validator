@@ -1470,6 +1470,16 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = 3002;
-app.listen(PORT, () => {
-    console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
-});
+
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
+    });
+}
+
+module.exports = {
+    app,
+    validateDomainName,
+    normalizeDomainName,
+    checkRateLimit
+};
