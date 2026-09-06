@@ -251,7 +251,9 @@ function queryDnsTcp(serverIp, buf) {
 }
 
 // --- ヘルパー関数: 指定されたタイプのリソースレコードを取得する ---
-async function getResourceRecord(domain, serverIp, rType) {
+async function getResourceRecord(domain, serverIp, rType, options = {}) {
+    const queryUdp = options.queryUdp || queryDnsUdp;
+    const queryTcp = options.queryTcp || queryDnsTcp;
     let resourceRecords = [];
     let rrsigRecords = [];
     let denialRecords = [];
@@ -263,7 +265,7 @@ async function getResourceRecord(domain, serverIp, rType) {
         questions: [{ type: rType, name: domain }],
         additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE, flags: dnsPacket.DNSSEC_OK }]
     });
-    let msg = await queryDnsUdp(serverIp, buf);
+    let msg = await queryUdp(serverIp, buf);
     let res = dnsPacket.decode(msg);
 
     if (res.flags & dnsPacket.TRUNCATED_RESPONSE) {
@@ -273,7 +275,7 @@ async function getResourceRecord(domain, serverIp, rType) {
             questions: [{ type: rType, name: domain }],
             additionals: [{ type: 'OPT', name: '.', flags: dnsPacket.DNSSEC_OK }]
         });
-        msg = await queryDnsTcp(serverIp, buf);
+        msg = await queryTcp(serverIp, buf);
         res = dnsPacket.streamDecode(msg);
     }
 
@@ -356,10 +358,12 @@ async function getARecord(domain) {
 }
 
 // --- ヘルパー関数: ゾーン頂点をルートから辿って取得する ---
-async function getZoneApex(domain) {
+async function getZoneApex(domain, options = {}) {
+    const queryUdp = options.queryUdp || queryDnsUdp;
+    const queryTcp = options.queryTcp || queryDnsTcp;
     const cachedDelegation = findCachedDelegation(domain);
     const useCachedDelegation = cachedDelegation && isUsableCachedNs(cachedDelegation.ns, domain);
-    let currentNs = useCachedDelegation ? cachedDelegation.ns : ROOT_NAMESERVER;
+    let currentNs = useCachedDelegation ? cachedDelegation.ns : (options.initialNameserver || ROOT_NAMESERVER);
     let parentNs = useCachedDelegation ? cachedDelegation.parentNs : '';
     let zoneApex = '';
     let rcode = '';
@@ -372,7 +376,7 @@ async function getZoneApex(domain) {
             questions: [{ type: 'SOA', name: domain }],
             additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
         });
-        let msg = await queryDnsUdp(currentNs, buf);
+        let msg = await queryUdp(currentNs, buf);
         let res = dnsPacket.decode(msg);
 
         // EDNS0 を処理できない権威サーバーは FORMERR を返すため、OPT を外して一度だけ再試行する
@@ -382,7 +386,7 @@ async function getZoneApex(domain) {
                 id: Math.floor(Math.random() * 65535),
                 questions: [{ type: 'SOA', name: domain }]
             });
-            msg = await queryDnsUdp(currentNs, buf);
+            msg = await queryUdp(currentNs, buf);
             res = dnsPacket.decode(msg);
         }
 
@@ -393,7 +397,7 @@ async function getZoneApex(domain) {
                 id: Math.floor(Math.random() * 65535),
                 questions: [{ type: 'SOA', name: domain }]
             });
-            msg = await queryDnsTcp(currentNs, buf);
+            msg = await queryTcp(currentNs, buf);
             res = dnsPacket.streamDecode(msg);
         }
 
@@ -1481,5 +1485,16 @@ module.exports = {
     app,
     validateDomainName,
     normalizeDomainName,
-    checkRateLimit
+    checkRateLimit,
+    getZoneApex,
+    getResourceRecord,
+    verifyDnskeyWithDs,
+    calculateKeyTag,
+    buildDnskeyFullRdata,
+    encodeDomainNameCanonical,
+    checkSignatureExpiration,
+    findARecordNodataProof,
+    findNxDomainProof,
+    nsec3Hash,
+    toBase32Hex
 };
