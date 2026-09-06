@@ -54,7 +54,7 @@ node dnssec-validator.js
 
 ### テスト
 
-外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、NSEC3 不在証明、ゾーン頂点の探索、親子が同じネームサーバーになるケース、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
+外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
 
 ```bash
 npm test

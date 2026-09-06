@@ -292,7 +292,8 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
 
 // --- ヘルパー関数: Aレコードを取得する ---
 // ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
-async function getARecord(domain) {
+async function getARecord(domain, options = {}) {
+    const queryUdp = options.queryUdp || queryDnsUdp;
     // domain が既に IP アドレスの場合は問い合わせ不要
     if (net.isIP(domain)) {
         return domain;
@@ -310,7 +311,7 @@ async function getARecord(domain) {
                 questions: [{ type: 'A', name: domain }],
                 additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
             });
-            const msg = await queryDnsUdp(currentNs, buf);
+            const msg = await queryUdp(currentNs, buf);
             const res = dnsPacket.decode(msg);
             const aRecord = res.answers.find(a => a.type === 'A');
             if (aRecord) {
@@ -960,6 +961,10 @@ function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
     return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
 
+function isZoneSigningKey(flags) {
+    return (flags & 0x0100) !== 0;
+}
+
 function verifyDenialRecordRrsig(record, rrsig, dnskeyRecord) {
     const expirationCheck = checkSignatureExpiration(rrsig);
     if (!expirationCheck.valid) {
@@ -1409,7 +1414,7 @@ app.post('/api/validate', async (req, res) => {
                             break;
                         }
                     }
-                    const verifiedByZsk = dnskeyRecords.some(key => (key.data.flags & 0x0100) !== 0 && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
+                    const verifiedByZsk = dnskeyRecords.some(key => isZoneSigningKey(key.data.flags) && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
                     const dnskeyRrsetVerifiedByKsk = aRecordValidation.trustChain.dnskeyRrsetSignatures.length > 0;
                     aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
@@ -1487,8 +1492,10 @@ module.exports = {
     normalizeDomainName,
     checkRateLimit,
     getZoneApex,
+    getARecord,
     getResourceRecord,
     verifyDnskeyWithDs,
+    isZoneSigningKey,
     calculateKeyTag,
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,

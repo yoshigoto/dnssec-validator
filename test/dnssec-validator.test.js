@@ -10,13 +10,16 @@ const {
     normalizeDomainName,
     checkRateLimit,
     getZoneApex,
+    getARecord,
     getResourceRecord,
     verifyDnskeyWithDs,
+    isZoneSigningKey,
     calculateKeyTag,
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
     findARecordNodataProof,
+    findNxDomainProof,
     nsec3Hash,
     toBase32Hex
 } = require('../dnssec-validator');
@@ -147,6 +150,88 @@ test('NSEC3 による A レコード不存在証明を検出する', () => {
         ...proof,
         data: { ...proof.data, rrtypes: ['A', 'SOA'] }
     }]), null);
+});
+
+test('NSEC による NXDOMAIN 証明を構成する', () => {
+    const proof = findNxDomainProof('missing.child.example.test', [
+        { name: 'child.example.test', type: 'NSEC', data: { nextDomain: 'next.example.test', rrtypes: ['NS'] } },
+        { name: 'a.example.test', type: 'NSEC', data: { nextDomain: 'z.example.test', rrtypes: [] } }
+    ]);
+
+    assert.deepEqual(proof.diagnostics, []);
+    assert.equal(proof.records.length, 3);
+    assert.deepEqual(proof.observedNsec, [
+        { name: 'child.example.test', nextDomain: 'next.example.test' },
+        { name: 'a.example.test', nextDomain: 'z.example.test' }
+    ]);
+});
+
+test('NSEC3 による NXDOMAIN 証明を構成する', () => {
+    const domain = 'missing.child.example.test';
+    const salt = Buffer.from('0102', 'hex');
+    const iterations = 1;
+    const closestEncloser = 'child.example.test';
+    const closestHash = toBase32Hex(nsec3Hash(closestEncloser, salt, iterations));
+    const broadOwner = '0'.repeat(32);
+    const broadNext = Buffer.alloc(20, 0xff);
+    const records = [
+        {
+            name: `${closestHash}.example.test`,
+            type: 'NSEC3',
+            data: { algorithm: 1, salt, iterations, nextDomain: Buffer.alloc(20), rrtypes: [] }
+        },
+        {
+            name: `${broadOwner}.example.test`,
+            type: 'NSEC3',
+            data: { algorithm: 1, salt, iterations, nextDomain: broadNext, rrtypes: [] }
+        }
+    ];
+    const proof = findNxDomainProof(domain, records);
+
+    assert.deepEqual(proof.diagnostics, []);
+    assert.equal(proof.records.length, 3);
+    assert.equal(proof.observedNsec3.length, 2);
+});
+
+test('委任先ゾーン外のグルーを使わず、次の NS にフォールバックする', async () => {
+    const calls = [];
+    const result = await getARecord('host.glue-fallback.test', {
+        queryUdp: async serverIp => {
+            calls.push(serverIp);
+            if (serverIp === '198.41.0.4') {
+                return dnsPacket.encode({
+                    type: 'response',
+                    answers: [],
+                    authorities: [
+                        { name: 'glue-fallback.test', type: 'NS', data: 'ns1.glue-fallback.test', ttl: 300 },
+                        { name: 'glue-fallback.test', type: 'NS', data: 'ns2.external.test', ttl: 300 }
+                    ],
+                    additionals: [
+                        { name: 'ns1.glue-fallback.test', type: 'A', data: '192.0.2.11', ttl: 300 },
+                        { name: 'ns2.external.test', type: 'A', data: '192.0.2.12', ttl: 300 }
+                    ]
+                });
+            }
+            if (serverIp === '192.0.2.11') {
+                throw new Error('優先 NS の通信失敗');
+            }
+            assert.equal(serverIp, 'ns2.external.test');
+            return dnsPacket.encode({
+                type: 'response',
+                answers: [{ name: 'host.glue-fallback.test', type: 'A', data: '192.0.2.20' }],
+                authorities: []
+            });
+        }
+    });
+
+    assert.equal(result, '192.0.2.20');
+    assert.deepEqual(calls, ['198.41.0.4', '192.0.2.11', 'ns2.external.test']);
+});
+
+test('DNSKEY の ZSK ビットを判定する', () => {
+    assert.equal(isZoneSigningKey(256), true);
+    assert.equal(isZoneSigningKey(257), true);
+    assert.equal(isZoneSigningKey(0), false);
 });
 
 test('権威 SOA 応答からゾーン頂点を確定する', async () => {
