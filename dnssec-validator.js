@@ -1078,6 +1078,11 @@ function findNxDomainProof(domain, denialRecords) {
     const labels = normalizeDnsName(domain).split('.');
     const closestEncloserCandidates = labels.slice(1).map((label, index) => labels.slice(index + 1).join('.'));
     const observedNsec = nsecRecords.map(record => ({ name: record.name, nextDomain: record.data.nextDomain }));
+    const coversName = (record, name) => {
+        const isSelfLoop = normalizeDnsName(record.name) === normalizeDnsName(record.data.nextDomain);
+        const hasOtherNsecOwner = nsecRecords.some(candidate => normalizeDnsName(candidate.name) !== normalizeDnsName(record.name));
+        return !(isSelfLoop && hasOtherNsecOwner) && dnsNameIsCovered(name, record.name, record.data.nextDomain);
+    };
     for (const closestEncloser of closestEncloserCandidates) {
         const closestEncloserRecord = nsecRecords.find(record => normalizeDnsName(record.name) === closestEncloser);
         if (!closestEncloserRecord) {
@@ -1085,8 +1090,8 @@ function findNxDomainProof(domain, denialRecords) {
         }
         const nextCloser = `${labels[closestEncloserCandidates.indexOf(closestEncloser)]}.${closestEncloser}`;
         const wildcard = `*.${closestEncloser}`;
-        const nextCloserRecord = nsecRecords.find(record => dnsNameIsCovered(nextCloser, record.name, record.data.nextDomain));
-        const wildcardRecord = nsecRecords.find(record => dnsNameIsCovered(wildcard, record.name, record.data.nextDomain));
+        const nextCloserRecord = nsecRecords.find(record => coversName(record, nextCloser));
+        const wildcardRecord = nsecRecords.find(record => coversName(record, wildcard));
         if (nextCloserRecord && wildcardRecord) {
             return { records: [closestEncloserRecord, nextCloserRecord, wildcardRecord], diagnostics: [], observedNsec };
         }

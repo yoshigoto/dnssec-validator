@@ -166,6 +166,16 @@ test('NSEC による NXDOMAIN 証明を構成する', () => {
     ]);
 });
 
+test('別の NSEC が存在する自己ループ NSEC を NXDOMAIN 証明に使わない', () => {
+    const proof = findNxDomainProof('b.cover.example.test', [
+        { name: 'aaaa.cover.example.test', type: 'NSEC', data: { nextDomain: 'localhost.cover.example.test', rrtypes: ['NSEC'] } },
+        { name: 'cover.example.test', type: 'NSEC', data: { nextDomain: 'cover.example.test', rrtypes: ['SOA', 'NSEC'] } }
+    ]);
+
+    assert.deepEqual(proof.records, []);
+    assert.match(proof.diagnostics.join('\n'), /ワイルドカード/);
+});
+
 test('NSEC3 による NXDOMAIN 証明を構成する', () => {
     const domain = 'missing.child.example.test';
     const salt = Buffer.from('0102', 'hex');
