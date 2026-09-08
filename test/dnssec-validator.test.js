@@ -203,6 +203,33 @@ test('NSEC3 による NXDOMAIN 証明を構成する', () => {
     assert.equal(proof.observedNsec3.length, 2);
 });
 
+test('別の NSEC3 が存在する自己ループ NSEC3 を NXDOMAIN 証明に使わない', () => {
+    const domain = 'd.cover.mismatch.nsec3.rsasha256.dnssec-check.jp';
+    const zone = 'cover.mismatch.nsec3.rsasha256.dnssec-check.jp';
+    const records = [
+        {
+            name: `RJ3NBAJD8F317DC9PTEB4NU1KUHKANKR.${zone}`,
+            type: 'NSEC3',
+            data: { algorithm: 1, salt: Buffer.alloc(0), iterations: 1, nextDomain: Buffer.from('0227728663325e074b1d265da065c14121a90e68', 'hex'), rrtypes: ['NS', 'SOA'] }
+        },
+        {
+            name: `616T0P4F7D40NUOI4AKBQQJJSP37KJGI.${zone}`,
+            type: 'NSEC3',
+            data: { algorithm: 1, salt: Buffer.alloc(0), iterations: 1, nextDomain: Buffer.from('4f2e5aa3eff30fb4f96f1267bdc3ec85a5a2539f', 'hex'), rrtypes: ['A'] }
+        },
+        {
+            name: `F7JI3MDI05SUMC1DNS8VH1CQKK2FFUVF.${zone}`,
+            type: 'NSEC3',
+            data: { algorithm: 1, salt: Buffer.alloc(0), iterations: 1, nextDomain: Buffer.from('79e721d9b20179eb302dbf11f8859aa504f7fbef', 'hex'), rrtypes: ['A', 'AAAA'] }
+        }
+    ];
+
+    const proof = findNxDomainProof(domain, records);
+
+    assert.deepEqual(proof.records, []);
+    assert.match(proof.diagnostics.join('\n'), /ワイルドカード/);
+});
+
 test('委任先ゾーン外のグルーを使わず、次の NS にフォールバックする', async () => {
     const calls = [];
     const result = await getARecord('host.glue-fallback.test', {

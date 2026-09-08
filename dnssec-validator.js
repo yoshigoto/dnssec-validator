@@ -1119,6 +1119,8 @@ function findNxDomainProof(domain, denialRecords) {
         return { records: [], diagnostics: ['権威サーバーの応答に NSEC/NSEC3 レコードがありません'], observedNsec3 };
     }
 
+    const hasOtherNsec3Owner = record => nsec3Records.some(candidate => normalizeDnsName(candidate.name) !== normalizeDnsName(record.name));
+
     for (let closestEncloserIndex = 1; closestEncloserIndex < labels.length; closestEncloserIndex++) {
         const closestEncloser = labels.slice(closestEncloserIndex).join('.');
         const nextCloser = labels.slice(closestEncloserIndex - 1).join('.');
@@ -1134,7 +1136,8 @@ function findNxDomainProof(domain, denialRecords) {
                 const ownerHash = record.name.split('.')[0].toUpperCase();
                 const nextHash = toBase32Hex(record.data.nextDomain);
                 const nameHash = toBase32Hex(nsec3Hash(name, salt, iterations));
-                return valueIsCovered(nameHash, ownerHash, nextHash);
+                const isSelfLoop = ownerHash === nextHash;
+                return !(isSelfLoop && hasOtherNsec3Owner(record)) && valueIsCovered(nameHash, ownerHash, nextHash);
             };
             const nextCloserRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, nextCloser));
             const wildcardRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, wildcard));
