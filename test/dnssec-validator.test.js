@@ -347,7 +347,7 @@ test('FORMERR の場合は EDNS なしで再試行する', async () => {
     assert.equal(result.zoneApex, 'formerr.test');
 });
 
-test('UDP 切断応答を TCP で再取得する', async () => {
+test('UDP 切り詰め応答を TCP で再取得する', async () => {
     const calls = [];
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
         queryUdp: async () => {

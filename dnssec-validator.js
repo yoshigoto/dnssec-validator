@@ -151,7 +151,7 @@ function isUsableCachedNs(candidateNs, targetDomain) {
 // --- ネームサーバー名解決が自己参照して循環しているかを検出するための進行中セット ---
 const inFlightNsResolutions = new Set();
 
-// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバや OS の名前解決には依存せず、キャッシュと getARecord で自前解決) ---
+// --- ヘルパー関数: ネームサーバー名を IP アドレスに解決 (フルサービスリゾルバーや OS の名前解決には依存せず、キャッシュと getARecord で自前解決) ---
 async function resolveNameserverIp(serverIp) {
     if (net.isIP(serverIp)) {
         return serverIp;
@@ -264,7 +264,7 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
         id: Math.floor(Math.random() * 65535),
         questions: [{ type: rType, name: domain }],
         additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE, flags: dnsPacket.DNSSEC_OK }]
-    });
+        });
     let msg = await queryUdp(serverIp, buf);
     let res = dnsPacket.decode(msg);
 
@@ -290,7 +290,7 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
     return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
-// --- ヘルパー関数: Aレコードを取得する ---
+// --- ヘルパー関数: A レコードを取得する ---
 // ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
 async function getARecord(domain, options = {}) {
     const queryUdp = options.queryUdp || queryDnsUdp;
@@ -320,7 +320,7 @@ async function getARecord(domain, options = {}) {
             }
             const nsAuthRecords = res.authorities.filter(a => a.type === 'NS');
             if (nsAuthRecords.length === 0) {
-                throw new Error(`${currentNs} から Aレコードの委任情報が得られません`);
+                throw new Error(`${currentNs} から A レコードの委任情報が得られません`);
             }
             // 委任先ゾーン内のグルーレコードだけを優先候補にし、残りはフォールバック候補として保持する (捨てない)
             const candidates = nsAuthRecords.map(nsAuthRecord => {
@@ -346,13 +346,13 @@ async function getARecord(domain, options = {}) {
                 continue;
             }
             if (i === MAX_RECURSION_DEPTH - 1) {
-                throw new Error(`Aレコード取得失敗 [${domain}]: ${err.message}`);
+                throw new Error(`A レコード取得失敗 [${domain}]: ${err.message}`);
             }
         }
     }
     
     if (!ipAddress) {
-        throw new Error(`Aレコード取得失敗 [${domain}]: ${MAX_RECURSION_DEPTH} 回の再帰でも IP アドレスが見つかりません`);
+        throw new Error(`A レコード取得失敗 [${domain}]: ${MAX_RECURSION_DEPTH} 回の再帰でも IP アドレスが見つかりません`);
     }
     
     return ipAddress;
@@ -368,7 +368,7 @@ async function getZoneApex(domain, options = {}) {
     let parentNs = useCachedDelegation ? cachedDelegation.parentNs : '';
     let zoneApex = '';
     let rcode = '';
-    let cdName = false;
+    let hasCnameOrDname = false;
 
     for (let i = 0; i < 10; i++) {
         let buf = dnsPacket.encode({
@@ -417,12 +417,12 @@ async function getZoneApex(domain, options = {}) {
                 if (answers.length > 0) {
                     const cnameRecord = answers.find(r => r.type === 'CNAME');
                     if (cnameRecord) {
-                        cdName = true;
+                        hasCnameOrDname = true;
                         break;
                     }
                     const dnameRecord = answers.find(r => r.type === 'DNAME');
                     if (dnameRecord) {
-                        cdName = true;
+                        hasCnameOrDname = true;
                         break;
                     }
                     const soaRecord = answers.find(r => r.type === 'SOA');
@@ -475,10 +475,10 @@ async function getZoneApex(domain, options = {}) {
         }
     }
 
-    return { currentNs: currentNs, parentNs: parentNs, zoneApex: zoneApex, rcode: rcode, cdName: cdName };
+    return { currentNs: currentNs, parentNs: parentNs, zoneApex: zoneApex, rcode: rcode, hasCnameOrDname: hasCnameOrDname };
 }
 
-// --- ヘルパー関数: RRSIG署名の有効期限チェック ---
+// --- ヘルパー関数: RRSIG 署名の有効期限チェック ---
 function checkSignatureExpiration(rrsig) {
     const now = Math.floor(Date.now() / 1000); // 現在時刻 (秒)
     const expiration = rrsig.data.expiration;
@@ -636,7 +636,7 @@ function encodeDomainNameCanonical(domain) {
     return Buffer.concat([buf, Buffer.from([0x00])]);
 }
 
-// --- ヘルパー関数: DNSKEYレコードから公開鍵バイト列を取得 ---
+// --- ヘルパー関数: DNSKEY レコードから公開鍵バイト列を取得 ---
 function getDnskeyRawKey(dnskeyData) {
     return dnskeyData.key || dnskeyData.publicKey;
 }
@@ -650,7 +650,7 @@ function buildDnskeyFullRdata(dnskeyData) {
     return Buffer.concat([headerBuf, getDnskeyRawKey(dnskeyData)]);
 }
 
-// --- ヘルパー関数: RRSIG署名の検証 (メイン関数) ---
+// --- ヘルパー関数: RRSIG 署名の検証 (メイン関数) ---
 // rrset: 同じ Type Covered を持つ全リソースレコードの配列 (RFC 4034 の署名対象RRset)
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     // 1. 署名の有効期限チェック
@@ -947,7 +947,7 @@ function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
     const signature = rrsig.data.signature;
     const publicKey = getDnskeyRawKey(dnskeyRecord.data);
     if (!signature || !publicKey) {
-        return { verified: false, reason: 'Aレコード署名の検証データを取得できません' };
+        return { verified: false, reason: 'A レコード署名の検証データを取得できません' };
     }
     if ([5, 7, 8, 10].includes(dnskeyRecord.data.algorithm)) {
         return verifyRSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
@@ -1195,7 +1195,7 @@ app.post('/api/validate', async (req, res) => {
         // 1. ドメイン名からゾーン頂点を取得
         const zoneApexInfo = await getZoneApex(domain);
         if (zoneApexInfo.zoneApex === '') {
-            if (zoneApexInfo.cdName) {
+            if (zoneApexInfo.hasCnameOrDname) {
                 return res.json({ success: false, logs: [...logs, 'このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
             } else {
                 return res.json({ success: false, logs: [...logs, `${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
@@ -1210,7 +1210,7 @@ app.post('/api/validate', async (req, res) => {
             tempLog += `${zoneApexInfo.parentNs} または `;
         }
 
-        // 2. 親サーバーから DSレコードを取得
+        // 2. 親サーバーから DS レコードを取得
         let targetNs = zoneApexInfo.parentNs;
         let parentIp = '';
         let dsInfo = null;
@@ -1238,7 +1238,7 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-                return res.json({ success: false, logs: [...logs, '親サーバーに DSレコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
+                return res.json({ success: false, logs: [...logs, '親サーバーに DS レコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
         
@@ -1265,7 +1265,7 @@ app.post('/api/validate', async (req, res) => {
             verified: null
         }));
         if (rrsigRecords.length === 0) {
-            logs.push(`親サーバーに DSレコードに対する署名 (RRSIGレコード) が見つかりません。`);
+            logs.push(`親サーバーに DS レコードに対する署名 (RRSIG レコード) が見つかりません。`);
         } else {
             let dsSignatureVerified = false;
             let verifiedKeyTag = new Array();
@@ -1305,7 +1305,7 @@ app.post('/api/validate', async (req, res) => {
             }
 
             if (dsSignatureVerified !== true) {
-                logs.push(`DSレコードに関する署名検証に失敗しました。`);
+                logs.push(`DS レコードに関する署名検証に失敗しました。`);
             }
         }
 
@@ -1324,12 +1324,12 @@ app.post('/api/validate', async (req, res) => {
         try {
             dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `子サーバーから DNSKEYレコード取得失敗: ${err.message}`], diagram });
+            return res.json({ success: false, logs: [...logs, `子サーバーから DNSKEY レコード取得失敗: ${err.message}`], diagram });
         }
         
         const dnskeyRecords = dnskeyInfo.resourceRecords;
         if (dnskeyRecords.length === 0) {
-            return res.json({ success: false, logs: [...logs, '子サーバーに DNSKEYレコードが存在しません。'], diagram });
+            return res.json({ success: false, logs: [...logs, '子サーバーに DNSKEY レコードが存在しません。'], diagram });
         }
         diagram.child.dnskey = dnskeyRecords.map(key => ({
             keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1337,7 +1337,7 @@ app.post('/api/validate', async (req, res) => {
             algorithm: key.data.algorithm
         }));
         
-        // 3.5. DNSKEYレコード署名検証 (オプション)
+            // 3.5. DNSKEY レコード署名検証 (オプション)
         const dnskeyRrsig = dnskeyInfo.rrsigRecords;
         diagram.child.rrsig = dnskeyRrsig.map(rrsig => ({
             keyTag: rrsig.data.keyTag,
@@ -1346,7 +1346,7 @@ app.post('/api/validate', async (req, res) => {
             verified: null
         }));
         if (dnskeyRrsig.length > 0) {
-            // DNSKEYレコード署名を検証 (自己署名KSKで検証)
+            // DNSKEY レコード署名を検証 (自己署名 KSK で検証)
             const kskRecords = dnskeyRecords.filter(r => r.data.flags === 257); // KSK のみ
             let signatureVerified = false;
             let verifiedKeyTag = new Array();
@@ -1354,7 +1354,7 @@ app.post('/api/validate', async (req, res) => {
                 const rrsig = dnskeyRrsig[rrsigIndex];
                 let rrsigVerified = false;
                 for (const ksk of kskRecords) {
-                    // DNSKEYレコードから Key Tag を計算
+                    // DNSKEY レコードから Key Tag を計算
                     const calculatedKeyTag = calculateKeyTag(ksk.data.algorithm, buildDnskeyFullRdata(ksk.data));
                     if (ksk.data.algorithm === rrsig.data.algorithm && calculatedKeyTag === rrsig.data.keyTag) {
                         const signatureResult = verifyRRSIGSignature(dnskeyRecords, rrsig, ksk, zoneApexInfo.zoneApex);
@@ -1374,17 +1374,17 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (signatureVerified !== true) {
-                logs.push(`DNSKEYレコードに関する署名検証に失敗しました。`);
+                logs.push(`DNSKEY レコードに関する署名検証に失敗しました。`);
             } else {
-                // 自己署名検証に使われた KSK が親ゾーンの DSレコードの Key Tag と一致するか確認
+                // 自己署名検証に使われた KSK が親ゾーンの DS レコードの Key Tag と一致するか確認
                 const dsRecordKeyTags = dsRecords.map(ds => ds.data.keyTag);
                 const unmatchedKskKeyTags = [...new Set(verifiedKeyTag)].filter(keyTag => !dsRecordKeyTags.includes(keyTag));
                 if (unmatchedKskKeyTags.length > 0) {
-                    logs.push(`DNSKEYレコードの署名検証に使用した KSK (Key Tag: ${unmatchedKskKeyTags.join(', ')}) は、親ゾーンの DSレコードの Key Tag と一致しません。`);
+                    logs.push(`DNSKEY レコードの署名検証に使用した KSK (Key Tag: ${unmatchedKskKeyTags.join(', ')}) は、親ゾーンの DS レコードの Key Tag と一致しません。`);
                 }
             }
         } else {
-            logs.push(`DNSKEYレコードに対する署名 (RRSIG) が見つかりませんでした。`);
+            logs.push(`DNSKEY レコードに対する署名 (RRSIG) が見つかりませんでした。`);
         }
 
         // 4. 信頼の連鎖を検証 (DS と DNSKEY の突合)
@@ -1458,14 +1458,14 @@ app.post('/api/validate', async (req, res) => {
                 }
             } catch (err) {
                 aRecordValidation.error = err.message;
-                logs.push(`AレコードのDNSSEC検証に失敗しました: ${err.message}`);
+                logs.push(`A レコードの DNSSEC 検証に失敗しました: ${err.message}`);
             }
         }
 
         if (matchFound) {
             success = true;
         } else {
-            logs.push(`親ゾーンの DSレコードと子ゾーンの DNSKEYレコードの突合に失敗しました。DNSSEC が正しく委任されていない可能性があります。`);
+            logs.push(`親ゾーンの DS レコードと子ゾーンの DNSKEY レコードの突合に失敗しました。DNSSEC が正しく委任されていない可能性があります。`);
         }
 
         res.json({ success, logs, diagram });
