@@ -1061,16 +1061,24 @@ function toBase32Hex(buffer) {
     return bits > 0 ? result + alphabet[(value << (5 - bits)) & 31] : result;
 }
 
-function findARecordNodataProof(domain, denialRecords) {
+function analyzeARecordNodataProof(domain, denialRecords) {
+    const diagnostics = [];
+    const normalizedDomain = normalizeDnsName(domain);
     for (const record of denialRecords) {
-        if (record.type === 'NSEC' && normalizeDnsName(record.name) === normalizeDnsName(domain) && !record.data.rrtypes.includes('A')) {
-            return record;
+        const isMatchingNsec = record.type === 'NSEC' && normalizeDnsName(record.name) === normalizedDomain;
+        const isMatchingNsec3 = record.type === 'NSEC3' && record.data.algorithm === 1 && record.name.split('.')[0].toUpperCase() === toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations));
+        if (!isMatchingNsec && !isMatchingNsec3) continue;
+
+        if (!record.data.rrtypes.includes('A')) {
+            return { record, diagnostics };
         }
-        if (record.type === 'NSEC3' && record.data.algorithm === 1 && record.name.split('.')[0].toUpperCase() === toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations)) && !record.data.rrtypes.includes('A')) {
-            return record;
-        }
+        diagnostics.push(`${record.type} の type bitmap に A が含まれるため、${domain} の A レコード不在を証明できません`);
     }
-    return null;
+    return { record: null, diagnostics };
+}
+
+function findARecordNodataProof(domain, denialRecords) {
+    return analyzeARecordNodataProof(domain, denialRecords).record;
 }
 
 function findNxDomainProof(domain, denialRecords) {
@@ -1428,13 +1436,16 @@ app.post('/api/validate', async (req, res) => {
                 }
                 if (!aRecordValidation.recordsFound) {
                     const nxDomainProof = aInfo.rcode === 'NXDOMAIN' ? findNxDomainProof(domain, aInfo.denialRecords) : null;
-                    const denialRecord = nxDomainProof ? null : findARecordNodataProof(domain, aInfo.denialRecords);
+                    const nodataProof = nxDomainProof ? null : analyzeARecordNodataProof(domain, aInfo.denialRecords);
+                    const denialRecord = nodataProof ? nodataProof.record : null;
                     const denialRecords = nxDomainProof ? nxDomainProof.records : denialRecord ? [denialRecord] : [];
                     const denialProof = { rcode: aInfo.rcode, type: denialRecords.length > 0 ? denialRecords[0].type : '', verified: false };
                     if (nxDomainProof) {
                         denialProof.diagnostics = nxDomainProof.diagnostics;
                         denialProof.observedNsec = nxDomainProof.observedNsec;
                         denialProof.observedNsec3 = nxDomainProof.observedNsec3;
+                    } else if (nodataProof) {
+                        denialProof.diagnostics = nodataProof.diagnostics;
                     }
                     aRecordValidation.denialProof = denialProof;
                     if (denialRecords.length > 0) {
@@ -1508,6 +1519,7 @@ module.exports = {
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
+    analyzeARecordNodataProof,
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,

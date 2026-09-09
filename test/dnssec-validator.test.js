@@ -21,7 +21,8 @@ const {
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
-    toBase32Hex
+    toBase32Hex,
+    analyzeARecordNodataProof,
 } = require('../dnssec-validator');
 
 function request(server, { method = 'GET', path = '/', body, headers = {} } = {}) {
@@ -150,6 +151,21 @@ test('NSEC3 による A レコード不存在証明を検出する', () => {
         ...proof,
         data: { ...proof.data, rrtypes: ['A', 'SOA'] }
     }]), null);
+});
+
+test('NSEC3 の type bitmap が A を示す NODATA 証明の不成立理由を返す', () => {
+    const domain = 'target.type.mismatch.nsec3.rsasha256.dnssec-check.jp';
+    const salt = Buffer.alloc(0);
+    const iterations = 1;
+    const ownerHash = toBase32Hex(nsec3Hash(domain, salt, iterations));
+    const result = analyzeARecordNodataProof(domain, [{
+        name: `${ownerHash}.type.mismatch.nsec3.rsasha256.dnssec-check.jp`,
+        type: 'NSEC3',
+        data: { algorithm: 1, salt, iterations, rrtypes: ['A', 'SOA'] }
+    }]);
+
+    assert.equal(result.record, null);
+    assert.match(result.diagnostics.join('\n'), /NSEC3 の type bitmap に A が含まれるため/);
 });
 
 test('NSEC による NXDOMAIN 証明を構成する', () => {
