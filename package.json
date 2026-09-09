@@ -1,6 +1,10 @@
 {
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "start": "node dnssec-validator.js",
     "test": "node --test"
   },
   "dependencies": {

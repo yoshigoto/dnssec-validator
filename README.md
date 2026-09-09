@@ -36,15 +36,22 @@ https://www.on-link.jp/dnssecvalidator/?domain=example.com
 
 ### 必要環境
 
-- Node.js
+- WSL2 上の Ubuntu
+- Node.js 22 LTS（`nvm` の利用を推奨）
 - 外部の権威 DNS サーバーへ UDP/TCP 53 番ポートで接続できるネットワーク
 
 ### 手順
 
+WSL2 の Ubuntu ターミナルで実行します。Node.js を `nvm` で管理する場合は、リポジトリの `.nvmrc` に合わせてください。
+
 ```bash
+nvm install
+nvm use
 npm install
-node dnssec-validator.js
+npm start
 ```
+
+`nvm` が未導入の場合は、Ubuntu 側でインストールしてからシェルを再起動してください。Node.js 18 以上で動作します。
 
 起動後、次の URL を開きます。
 
@@ -59,6 +66,8 @@ node dnssec-validator.js
 ```bash
 npm test
 ```
+
+VS Code では WSL 拡張機能でこのフォルダーを開くと、統合ターミナル、起動設定、テスト設定が Ubuntu 側で実行されます。
 
 テスト本体は `test/dnssec-validator.test.js` にあります。実際の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
 
