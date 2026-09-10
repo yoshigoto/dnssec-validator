@@ -54,7 +54,14 @@ const aRecordValidationText = validation => {
         'DS -> KSK: ' + (kskKeyTags.length ? 'Key Tag ' + kskKeyTags.join(', ') + ' が一致 ✓' : '一致する KSK なし ✕'),
         'KSK -> DNSKEY RRset: ' + (dnskeySignatures.length ? dnskeySignatures.map(signature => 'Key Tag ' + signature.kskKeyTag).join(', ') + ' による署名検証: 成功 ✓' : 'DS一致 KSK による署名検証: 失敗 ✕')
     ];
-    return lines.concat(validation.signatures.map(signature => 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + (signature.trustChainVerified ? '信頼の連鎖: 成功 ✓' : '信頼の連鎖: 失敗 ✕')));
+    return lines.concat(validation.signatures.map(signature => {
+        const result = signature.verified === false
+            ? '署名検証: 失敗 ✕'
+            : signature.trustChainVerified
+                ? '信頼の連鎖: 成功 ✓'
+                : '信頼の連鎖: 失敗 ✕';
+        return 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
+    }));
 };
 
 function setNodeContent(nodeId, title, titleColor, lines) {
