@@ -60,8 +60,9 @@ const aRecordValidationText = validation => {
             : signature.trustChainVerified
                 ? '信頼の連鎖: 成功 ✓'
                 : '信頼の連鎖: 失敗 ✕';
-        return 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
-    }));
+        const line = 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
+        return signature.verified === false && signature.reason ? [line, '失敗理由: ' + signature.reason] : [line];
+    }).flat());
 };
 
 function setNodeContent(nodeId, title, titleColor, lines) {

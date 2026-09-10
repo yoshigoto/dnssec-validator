@@ -1428,8 +1428,10 @@ app.post('/api/validate', async (req, res) => {
                 for (const rrsig of aInfo.rrsigRecords) {
                     let verified = false;
                     let zskKeyTag = null;
+                    let reason = '';
                     for (const key of dnskeyRecords) {
                         const result = verifyARecordRrsig(aInfo.resourceRecords, rrsig, key, domain);
+                        if (result.reason) reason = result.reason;
                         if (result.verified) {
                             verified = true;
                             zskKeyTag = calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data));
@@ -1438,7 +1440,7 @@ app.post('/api/validate', async (req, res) => {
                     }
                     const verifiedByZsk = dnskeyRecords.some(key => isZoneSigningKey(key.data.flags) && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
                     const dnskeyRrsetVerifiedByKsk = aRecordValidation.trustChain.dnskeyRrsetSignatures.length > 0;
-                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
+                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, reason, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
                 if (!aRecordValidation.recordsFound) {
                     const nxDomainProof = aInfo.rcode === 'NXDOMAIN' ? findNxDomainProof(domain, aInfo.denialRecords) : null;
