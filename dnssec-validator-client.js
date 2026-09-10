@@ -31,7 +31,7 @@ const keyText = (records, role) => !records || records.length === 0 ? [role + ':
 const dsText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest);
 const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証'));
 const aRecordValidationText = validation => {
-    if (!validation || !validation.queried) return ['入力名はゾーン頂点です（検証不要）'];
+    if (!validation || !validation.queried) return ['検証データを取得できませんでした'];
     if (validation.error) return ['検証できませんでした: ' + validation.error];
     if (!validation.recordsFound) {
         const proof = validation.denialProof;

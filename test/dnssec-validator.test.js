@@ -18,6 +18,7 @@ const {
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
+    createARecordValidation,
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
@@ -133,6 +134,14 @@ test('RRSIG の未開始・期限切れを検出する', () => {
     assert.match(notStarted.reason, /まだ有効になっていません/);
     assert.equal(expired.valid, false);
     assert.match(expired.reason, /期限が切れています/);
+});
+
+test('ゾーン頂点でも A レコード DNSSEC 検証を開始する', () => {
+    const validation = createARecordValidation();
+
+    assert.equal(validation.queried, true);
+    assert.equal(validation.recordsFound, false);
+    assert.deepEqual(validation.signatures, []);
 });
 
 test('NSEC3 による A レコード不存在証明を検出する', () => {

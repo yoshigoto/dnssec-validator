@@ -754,6 +754,10 @@ function buildDsRdata(dsRecord) {
     return rdata;
 }
 
+function createARecordValidation() {
+    return { queried: true, recordsFound: false, signatures: [], trustChain: { dsMatchedKskKeyTags: [], dnskeyRrsetSignatures: [] } };
+}
+
 function verifyDSSignature(dsRecords, rrsig, dnskeyRecord, zoneName) {
     const expirationCheck = checkSignatureExpiration(rrsig);
     if (!expirationCheck.valid) {
@@ -1320,7 +1324,7 @@ app.post('/api/validate', async (req, res) => {
         }
         
         diagram.child.name = zoneApexInfo.zoneApex;
-        diagram.child.server = zoneApexInfo.currentNs;
+        diagram.child.server = zoneApexInfo.childNameservers.join(', ') || zoneApexInfo.currentNs;
         
         let dnskeyInfo = null;
         try {
@@ -1404,8 +1408,8 @@ app.post('/api/validate', async (req, res) => {
         const matchFound = dsMatchedKskRecords.length > 0;
         diagram.checks.dsKeyMatch = matchFound;
 
-        if (domain !== zoneApexInfo.zoneApex) {
-            const aRecordValidation = { queried: true, recordsFound: false, signatures: [], trustChain: { dsMatchedKskKeyTags: [], dnskeyRrsetSignatures: [] } };
+        {
+            const aRecordValidation = createARecordValidation();
             diagram.child.aRecordValidation = aRecordValidation;
             try {
                 const dsMatchedKskKeyTags = dsMatchedKskRecords.map(key => calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)));
@@ -1521,6 +1525,7 @@ module.exports = {
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
+    createARecordValidation,
     analyzeARecordNodataProof,
     findARecordNodataProof,
     findNxDomainProof,
