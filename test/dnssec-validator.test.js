@@ -408,6 +408,27 @@ test('委任先が同じ IP の場合も親子同居として探索結果を保�
     assert.equal(result.currentNs, sharedNameserver);
 });
 
+test('親子ゾーンの NS RRset を委任応答から個別に保持する', async () => {
+    const responses = [
+        { authorities: [{ name: 'parent.test', type: 'NS', data: 'ns1.parent.test', ttl: 300 }] },
+        { authorities: [{ name: 'child.parent.test', type: 'NS', data: 'ns1.child.test', ttl: 300 }, { name: 'child.parent.test', type: 'NS', data: 'ns2.child.test', ttl: 300 }] },
+        {
+            flags: dnsPacket.AUTHORITATIVE_ANSWER,
+            answers: [{
+                name: 'child.parent.test', type: 'SOA',
+                data: { mname: 'ns1.child.test', rname: 'hostmaster.child.parent.test', serial: 1, refresh: 3600, retry: 600, expire: 86400, minimum: 300 }
+            }]
+        }
+    ];
+    const result = await getZoneApex('host.child.parent.test', {
+        initialNameserver: '192.0.2.1',
+        queryUdp: async () => dnsPacket.encode({ type: 'response', ...responses.shift() })
+    });
+
+    assert.deepEqual(result.parentNameservers, ['ns1.parent.test']);
+    assert.deepEqual(result.childNameservers, ['ns1.child.test', 'ns2.child.test']);
+});
+
 test('GET / は UI を返し、セキュリティヘッダーを付ける', async () => {
     const server = app.listen(0);
     try {

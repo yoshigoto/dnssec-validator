@@ -362,10 +362,10 @@ async function getARecord(domain, options = {}) {
 async function getZoneApex(domain, options = {}) {
     const queryUdp = options.queryUdp || queryDnsUdp;
     const queryTcp = options.queryTcp || queryDnsTcp;
-    const cachedDelegation = findCachedDelegation(domain);
-    const useCachedDelegation = cachedDelegation && isUsableCachedNs(cachedDelegation.ns, domain);
-    let currentNs = useCachedDelegation ? cachedDelegation.ns : (options.initialNameserver || ROOT_NAMESERVER);
-    let parentNs = useCachedDelegation ? cachedDelegation.parentNs : '';
+    let currentNs = options.initialNameserver || ROOT_NAMESERVER;
+    let parentNs = '';
+    let parentNameservers = [];
+    let childNameservers = [];
     let zoneApex = '';
     let rcode = '';
     let hasCnameOrDname = false;
@@ -451,6 +451,8 @@ async function getZoneApex(domain, options = {}) {
         if (!isAuthoritative && authorities.length > 0) {
             const nsRecords = authorities.filter(r => r.type === 'NS');
             if (nsRecords.length > 0) {
+                parentNameservers = childNameservers;
+                childNameservers = nsRecords.map(record => record.data);
                 // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
@@ -475,7 +477,7 @@ async function getZoneApex(domain, options = {}) {
         }
     }
 
-    return { currentNs: currentNs, parentNs: parentNs, zoneApex: zoneApex, rcode: rcode, hasCnameOrDname: hasCnameOrDname };
+    return { currentNs: currentNs, parentNs: parentNs, parentNameservers, childNameservers, zoneApex: zoneApex, rcode: rcode, hasCnameOrDname: hasCnameOrDname };
 }
 
 // --- ヘルパー関数: RRSIG 署名の有効期限チェック ---
@@ -1202,9 +1204,9 @@ app.post('/api/validate', async (req, res) => {
             }
         }
         diagram.parent.name = zoneApexInfo.zoneApex;
-        diagram.parent.server = zoneApexInfo.parentNs || zoneApexInfo.currentNs;
+        diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || zoneApexInfo.parentNs || zoneApexInfo.currentNs;
         diagram.child.name = zoneApexInfo.zoneApex;
-        diagram.child.server = zoneApexInfo.currentNs;
+        diagram.child.server = zoneApexInfo.childNameservers.join(', ') || zoneApexInfo.currentNs;
         let tempLog = '';
         if (zoneApexInfo.parentNs !== '') {
             tempLog += `${zoneApexInfo.parentNs} または `;
@@ -1214,7 +1216,7 @@ app.post('/api/validate', async (req, res) => {
         let targetNs = zoneApexInfo.parentNs;
         let parentIp = '';
         let dsInfo = null;
-        diagram.parent.server = targetNs || zoneApexInfo.currentNs;
+        diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs || zoneApexInfo.currentNs;
         
         try {
             if (targetNs) {
@@ -1229,7 +1231,7 @@ app.post('/api/validate', async (req, res) => {
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
             try {
                 targetNs = zoneApexInfo.currentNs;
-                diagram.parent.server = targetNs;
+                diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
                 parentIp = await getARecord(targetNs);
                 dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
             } catch (err) {
@@ -1248,9 +1250,9 @@ app.post('/api/validate', async (req, res) => {
         
         const dsRecords = dsInfo.resourceRecords;
         diagram.parent.name = zoneApexInfo.zoneApex;
-        diagram.parent.server = targetNs;
+        diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
         diagram.child.name = zoneApexInfo.zoneApex;
-        diagram.child.server = zoneApexInfo.currentNs;
+        diagram.child.server = zoneApexInfo.childNameservers.join(', ') || zoneApexInfo.currentNs;
         diagram.parent.ds = dsRecords.map(ds => ({
             keyTag: ds.data.keyTag,
             algorithm: ds.data.algorithm,
