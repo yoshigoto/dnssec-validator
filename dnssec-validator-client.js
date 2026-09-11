@@ -132,6 +132,11 @@ async function validate(event) {
     renderDiagram(emptyDiagram(domain));
     try {
         const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) });
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+            const bodyText = await response.text();
+            throw new Error(`サーバーから予期しない応答がありました (HTTP ${response.status})。プロキシ/ゲートウェイのタイムアウトなどが考えられます。`, { cause: bodyText });
+        }
         const data = await response.json();
         if (data.error) {
             statusBox.className = 'result-status-box status-failed';

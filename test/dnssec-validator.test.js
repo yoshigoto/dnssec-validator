@@ -24,6 +24,7 @@ const {
     nsec3Hash,
     toBase32Hex,
     analyzeARecordNodataProof,
+    createTimeoutGuardedResponder,
 } = require('../dnssec-validator');
 
 function request(server, { method = 'GET', path = '/', body, headers = {} } = {}) {
@@ -482,4 +483,38 @@ test('不正な JSON は 400 を返す', async () => {
     } finally {
         await new Promise(resolve => server.close(resolve));
     }
+});
+
+function makeFakeResponse() {
+    const res = { statusCode: null, body: null };
+    res.status = code => { res.statusCode = code; return res; };
+    res.json = body => { res.body = body; return res; };
+    return res;
+}
+
+test('createTimeoutGuardedResponder: 制限時間内に手動で応答すればタイムアウト応答は送られない (ML-DSA 等の大きな鍵で処理が長引いても HTML エラーページ化を防ぐ)', async () => {
+    const res = makeFakeResponse();
+    const sendJson = createTimeoutGuardedResponder(res, 20, () => ({ success: false, timedOut: true }));
+    sendJson(200, { success: true });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.deepEqual(res.body, { success: true });
+    assert.equal(res.statusCode, 200);
+});
+
+test('createTimeoutGuardedResponder: 制限時間を超えると自動でタイムアウト応答が送られる', async () => {
+    const res = makeFakeResponse();
+    createTimeoutGuardedResponder(res, 10, () => ({ success: false, timedOut: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(res.body, { success: false, timedOut: true });
+    assert.equal(res.statusCode, 200);
+});
+
+test('createTimeoutGuardedResponder: タイムアウト後に本処理が完了しても二重応答しない', async () => {
+    const res = makeFakeResponse();
+    const sendJson = createTimeoutGuardedResponder(res, 10, () => ({ success: false, timedOut: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(res.body, { success: false, timedOut: true });
+    sendJson(500, { success: false, lateResult: true });
+    assert.deepEqual(res.body, { success: false, timedOut: true });
+    assert.equal(res.statusCode, 200);
 });

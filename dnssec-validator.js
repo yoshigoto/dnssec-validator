@@ -27,6 +27,7 @@ const DNS_UDP_PAYLOAD_SIZE = 1232;
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
+const API_VALIDATE_TIMEOUT_MS = 25000; // ホスティング基盤側のゲートウェイタイムアウト(HTMLエラーページ化)より先に必ずJSONで応答するための上限
 
 // --- ドメイン名バリデーション関数 ---
 function validateDomainName(domain) {
@@ -56,6 +57,19 @@ function validateDomainName(domain) {
 // --- ドメイン名正規化関数 ---
 function normalizeDomainName(domain) {
     return domain.toLowerCase().replace(/\.$/, ''); // 末尾のドット削除、小文字化
+}
+
+// --- 一定時間内に応答が送信されなければ、指定された内容で自動的に一度だけ応答するガードを作る ---
+function createTimeoutGuardedResponder(res, timeoutMs, buildTimeoutBody) {
+    let responded = false;
+    const sendJson = (status, body) => {
+        if (responded) return;
+        responded = true;
+        clearTimeout(timeoutTimer);
+        res.status(status).json(body);
+    };
+    const timeoutTimer = setTimeout(() => sendJson(200, buildTimeoutBody()), timeoutMs);
+    return sendJson;
 }
 
 // --- レート制限チェック関数 ---
@@ -1197,14 +1211,20 @@ app.post('/api/validate', async (req, res) => {
         checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
     };
 
+    // 大きな鍵長 (ML-DSA 等) で DNS の TCP フォールバックが多発すると処理が長引くため、
+    // 必ず期限内に (HTMLエラーページではなく) JSON で応答できるようにガードする
+    const sendJson = createTimeoutGuardedResponder(res, API_VALIDATE_TIMEOUT_MS, () => (
+        { success: false, logs: [...logs, `検証処理が制限時間 (${API_VALIDATE_TIMEOUT_MS / 1000}秒) を超えたため中断しました。`], diagram }
+    ));
+
     try {
         // 1. ドメイン名からゾーン頂点を取得
         const zoneApexInfo = await getZoneApex(domain);
         if (zoneApexInfo.zoneApex === '') {
             if (zoneApexInfo.hasCnameOrDname) {
-                return res.json({ success: false, logs: [...logs, 'このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
+                return sendJson(200, { success: false, logs: [...logs, 'このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
             } else {
-                return res.json({ success: false, logs: [...logs, `${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
+                return sendJson(200, { success: false, logs: [...logs, `${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
             }
         }
         diagram.parent.name = zoneApexInfo.zoneApex;
@@ -1244,12 +1264,12 @@ app.post('/api/validate', async (req, res) => {
             }
             
             if (!dsInfo || dsInfo.resourceRecords.length === 0) {
-                return res.json({ success: false, logs: [...logs, '親サーバーに DS レコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
+                return sendJson(200, { success: false, logs: [...logs, '親サーバーに DS レコードが見つかりません。DNSSEC が未委任の可能性があります。'], diagram });
             }
         }
         
         if (!parentIp) {
-            return res.json({ success: false, logs: [...logs, '親サーバーの IP アドレス取得に失敗しました。'], diagram });
+            return sendJson(200, { success: false, logs: [...logs, '親サーバーの IP アドレス取得に失敗しました。'], diagram });
         }
         
         const dsRecords = dsInfo.resourceRecords;
@@ -1320,7 +1340,7 @@ app.post('/api/validate', async (req, res) => {
         try {
             childIp = await getARecord(zoneApexInfo.currentNs);
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
+            return sendJson(200, { success: false, logs: [...logs, `子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
         }
         
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -1330,12 +1350,12 @@ app.post('/api/validate', async (req, res) => {
         try {
             dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
-            return res.json({ success: false, logs: [...logs, `子サーバーから DNSKEY レコード取得失敗: ${err.message}`], diagram });
+            return sendJson(200, { success: false, logs: [...logs, `子サーバーから DNSKEY レコード取得失敗: ${err.message}`], diagram });
         }
         
         const dnskeyRecords = dnskeyInfo.resourceRecords;
         if (dnskeyRecords.length === 0) {
-            return res.json({ success: false, logs: [...logs, '子サーバーに DNSKEY レコードが存在しません。'], diagram });
+            return sendJson(200, { success: false, logs: [...logs, '子サーバーに DNSKEY レコードが存在しません。'], diagram });
         }
         diagram.child.dnskey = dnskeyRecords.map(key => ({
             keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1476,12 +1496,12 @@ app.post('/api/validate', async (req, res) => {
             logs.push(`親ゾーンの DS レコードと子ゾーンの DNSKEY レコードの突合に失敗しました。DNSSEC が正しく委任されていない可能性があります。`);
         }
 
-        res.json({ success, logs, diagram });
+        sendJson(200, { success, logs, diagram });
 
     } catch (err) {
         const errorMsg = `予期しないエラーが発生しました: ${err.message}`;
         logs.push(errorMsg);
-        res.status(500).json({ error: errorMsg, logs, diagram });
+        sendJson(500, { error: errorMsg, logs, diagram });
     }
 });
 
@@ -1532,5 +1552,6 @@ module.exports = {
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
-    toBase32Hex
+    toBase32Hex,
+    createTimeoutGuardedResponder
 };
