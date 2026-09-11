@@ -20,6 +20,7 @@ const {
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
+    verifyMLDSASignature,
     createARecordValidation,
     findARecordNodataProof,
     findNxDomainProof,
@@ -28,6 +29,7 @@ const {
     analyzeARecordNodataProof,
     createTimeoutGuardedResponder,
 } = require('../dnssec-validator');
+const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js');
 
 function request(server, { method = 'GET', path = '/', body, headers = {} } = {}) {
     return new Promise((resolve, reject) => {
@@ -113,6 +115,20 @@ test('DS のダイジェスト不一致を検出する', () => {
 
     assert.equal(result.match, false);
     assert.match(result.reason, /Digestが異なります/);
+});
+
+test('ML-DSA-44 の署名を検証する', () => {
+    const { publicKey, secretKey } = ml_dsa44.keygen(new Uint8Array(ml_dsa44.lengths.seed));
+    const message = Buffer.from('dnssec ml-dsa-44');
+    const signature = Buffer.from(ml_dsa44.sign(message, secretKey));
+
+    assert.deepEqual(
+        verifyMLDSASignature(Buffer.from(publicKey), signature, message, 18),
+        { verified: true, reason: '' }
+    );
+
+    signature[0] ^= 1;
+    assert.equal(verifyMLDSASignature(Buffer.from(publicKey), signature, message, 18).verified, false);
 });
 
 test('未対応の DS Digest Type を拒否する', () => {

@@ -116,6 +116,7 @@ Content-Type: application/json
 - RSA: RSASHA1、RSASHA1-NSEC3-SHA1、RSASHA256、RSASHA512
 - ECDSA: ECDSAP256SHA256、ECDSAP384SHA384
 - EdDSA: ED25519、ED448
+- ML-DSA: ML-DSA-44
 
 委任情報とネームサーバーの IP アドレスは、TTL を使ったプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 30 回のレート制限があります。
 

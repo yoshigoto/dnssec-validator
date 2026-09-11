@@ -4,6 +4,7 @@ const dgram = require('dgram');
 const dnsPacket = require('dns-packet');	// https://github.com/mafintosh/dns-packet
 const dnsTypes = require('dns-packet/types');
 const crypto = require('crypto');
+const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js');
 
 const app = express();
 app.disable('x-powered-by');
@@ -652,6 +653,23 @@ function verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
     }
 }
 
+// --- ヘルパー関数: ML-DSA-44署名の検証 ---
+function verifyMLDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm) {
+    if (algorithm !== 18) {
+        return { verified: false, reason: `未対応のML-DSAアルゴリズム [${algorithm}]` };
+    }
+
+    try {
+        const verified = ml_dsa44.verify(signatureBuffer, messageBuffer, publicKeyBuffer);
+        return {
+            verified,
+            reason: verified ? '' : 'ML-DSA-44署名検証に失敗しました。'
+        };
+    } catch (err) {
+        return { verified: false, reason: `ML-DSA-44署名検証でエラーが発生しました。: ${err.message}` };
+    }
+}
+
 // --- ヘルパー関数: ドメイン名を DNSワイヤーフォーマットに変換 (正規化・非圧縮) ---
 function encodeDomainNameCanonical(domain) {
     const labels = domain.replace(/\.$/, '').toLowerCase().split('.');
@@ -764,6 +782,8 @@ function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
     } else if (algorithm === 15 || algorithm === 16) {
         // EdDSA系アルゴリズム
         signatureResult = verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 18) {
+        signatureResult = verifyMLDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
     } else {
         return { verified: false, reason: `未対応の暗号アルゴリズム [${algorithm}]` };
     }
@@ -851,6 +871,8 @@ function verifyDSSignature(dsRecords, rrsig, dnskeyRecord, zoneName) {
         signatureResult = verifyECDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
     } else if (algorithm === 15 || algorithm === 16) {
         signatureResult = verifyEdDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
+    } else if (algorithm === 18) {
+        signatureResult = verifyMLDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, algorithm);
     } else {
         return { verified: false, reason: `未対応の暗号アルゴリズム [${algorithm}]` };
     }
@@ -886,7 +908,7 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     const dnskeyAlgos = {
         1: 'RSAMD5 (非推奨)', 5: 'RSASHA1 (非推奨)', 7: 'RSASHA1-NSEC3-SHA1 (非推奨)',
         8: 'RSASHA256', 10: 'RSASHA512', 13: 'ECDSAP256SHA256', 14: 'ECDSAP384SHA384',
-        15: 'ED25519', 16: 'ED448'
+        15: 'ED25519', 16: 'ED448', 18: 'ML-DSA-44'
     };
     const dsDigestTypes = { 1: 'SHA-1', 2: 'SHA-256', 4: 'SHA-384' };
 
@@ -991,6 +1013,9 @@ function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
     if ([15, 16].includes(dnskeyRecord.data.algorithm)) {
         return verifyEdDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
     }
+    if (dnskeyRecord.data.algorithm === 18) {
+        return verifyMLDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    }
     return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
 
@@ -1037,6 +1062,9 @@ function verifyDenialRecordRrsig(record, rrsig, dnskeyRecord) {
     }
     if ([15, 16].includes(dnskeyRecord.data.algorithm)) {
         return verifyEdDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
+    }
+    if (dnskeyRecord.data.algorithm === 18) {
+        return verifyMLDSASignature(publicKey, signature, message, dnskeyRecord.data.algorithm);
     }
     return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
@@ -1561,6 +1589,7 @@ module.exports = {
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
     checkSignatureExpiration,
+    verifyMLDSASignature,
     createARecordValidation,
     analyzeARecordNodataProof,
     findARecordNodataProof,
