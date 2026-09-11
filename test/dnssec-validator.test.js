@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const dnsPacket = require('dns-packet');
 const http = require('node:http');
+const net = require('node:net');
 const test = require('node:test');
 
 const {
@@ -9,6 +10,7 @@ const {
     validateDomainName,
     normalizeDomainName,
     checkRateLimit,
+    queryDnsTcp,
     getZoneApex,
     getARecord,
     getResourceRecord,
@@ -376,6 +378,34 @@ test('UDP 切り詰め応答を TCP で再取得する', async () => {
 
     assert.deepEqual(calls, ['udp', 'tcp']);
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
+});
+
+test('TCP DNS 応答は全長受信後にリモート close を待たず完了する', async () => {
+    const server = net.createServer(socket => {
+        socket.once('data', () => {
+            socket.write(dnsPacket.streamEncode({
+                type: 'response',
+                answers: [{ name: 'example.test', type: 'A', data: '192.0.2.10' }]
+            }));
+            setTimeout(() => socket.end(), 150);
+        });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+        const query = dnsPacket.streamEncode({
+            type: 'query',
+            questions: [{ type: 'A', name: 'example.test' }]
+        });
+        const start = Date.now();
+        const response = await queryDnsTcp('127.0.0.1', query, server.address().port);
+        const elapsed = Date.now() - start;
+        const decoded = dnsPacket.streamDecode(response);
+
+        assert.equal(decoded.answers[0].data, '192.0.2.10');
+        assert.ok(elapsed < 100, `TCP 応答完了が遅すぎます: ${elapsed}ms`);
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
 });
 
 test('委任先が同じ IP の場合も親子同居として探索結果を保持する', async () => {

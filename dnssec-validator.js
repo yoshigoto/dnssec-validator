@@ -221,16 +221,28 @@ function queryDnsUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
 }
 
 // --- ヘルパー関数: 指定したIPアドレスにTCPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
-function queryDnsTcp(serverIp, buf) {
+function queryDnsTcp(serverIp, buf, port = 53) {
     return new Promise((resolve, reject) => {
         (async () => {
             const resolvedIp = net.isIP(serverIp) ? serverIp : await resolveNameserverIp(serverIp);
 
             var responseBuffer = null;
             var expectedLength = 0;
+            var settled = false;
             const client = new net.Socket();
 
-            client.connect(53, resolvedIp, () => {
+            const finish = (err, msg) => {
+                if (settled) return;
+                settled = true;
+                client.destroy();
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(msg);
+                }
+            };
+
+            client.connect(port, resolvedIp, () => {
                 client.write(buf);
             });
 
@@ -244,20 +256,21 @@ function queryDnsTcp(serverIp, buf) {
                 } else {
                     responseBuffer = Buffer.concat([responseBuffer, data]);
                 }
-                if (responseBuffer.byteLength >= expectedLength) {
-                    client.end();
+                if (expectedLength > 0 && responseBuffer.byteLength >= expectedLength + 2) {
+                    finish(null, responseBuffer);
                 }
             });
 
             client.on('error', (err) => {
-                reject(err);
+                finish(err);
             });
 
             client.on('close', (hadError) => {
-                if (!hadError) {
-                    resolve(responseBuffer);
-                } else {
-                    reject(hadError);
+                if (settled) return;
+                if (!hadError && responseBuffer) {
+                    finish(null, responseBuffer);
+                } else if (hadError) {
+                    finish(new Error(`TCP DNSクエリ失敗: ${serverIp}`));
                 }
             });
         })().catch(reject);
@@ -1538,6 +1551,7 @@ module.exports = {
     validateDomainName,
     normalizeDomainName,
     checkRateLimit,
+    queryDnsTcp,
     getZoneApex,
     getARecord,
     getResourceRecord,
