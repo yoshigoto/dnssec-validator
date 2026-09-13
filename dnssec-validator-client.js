@@ -146,7 +146,7 @@ async function validate(event) {
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
             statusBox.className = 'result-status-box ' + (data.success ? 'status-success' : 'status-failed');
-            statusBox.innerText = data.success ? '検証成功: DNSSEC の委任状態は問題ありません！' : '検証失敗: 信頼の連鎖が切れています';
+            statusBox.innerText = data.success ? '検証成功: DNSSEC の検証結果に問題はありません！' : '検証失敗: DNSSEC の署名または不在証明を検証できませんでした';
             if (data.logs && data.logs.length > 0) { errorDetailsElement.textContent = sanitizeDisplayText(data.logs.join('\n')); errorDetailsElement.style.display = 'block'; }
             if (data.diagram) renderDiagram(data.diagram);
         }

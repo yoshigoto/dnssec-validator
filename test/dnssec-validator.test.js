@@ -22,6 +22,7 @@ const {
     checkSignatureExpiration,
     verifyMLDSASignature,
     createARecordValidation,
+    isValidationSuccessful,
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
@@ -161,6 +162,33 @@ test('ゾーン頂点でも A レコード DNSSEC 検証を開始する', () => 
     assert.equal(validation.queried, true);
     assert.equal(validation.recordsFound, false);
     assert.deepEqual(validation.signatures, []);
+});
+
+test('全信頼連鎖と A レコード署名が有効な場合だけ検証成功とする', () => {
+    const diagram = {
+        checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
+        child: { aRecordValidation: { queried: true, recordsFound: true, signatures: [{ trustChainVerified: true }] } }
+    };
+
+    assert.equal(isValidationSuccessful(diagram), true);
+    diagram.checks.dsSignature = false;
+    assert.equal(isValidationSuccessful(diagram), false);
+    diagram.checks.dsSignature = true;
+    diagram.child.aRecordValidation.signatures[0].trustChainVerified = false;
+    assert.equal(isValidationSuccessful(diagram), false);
+});
+
+test('A レコードがない場合は有効な不在証明を検証成功の必須条件とする', () => {
+    const diagram = {
+        checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
+        child: { aRecordValidation: { queried: true, recordsFound: false, signatures: [], denialProof: { verified: true } } }
+    };
+
+    assert.equal(isValidationSuccessful(diagram), true);
+    diagram.child.aRecordValidation.denialProof.verified = false;
+    assert.equal(isValidationSuccessful(diagram), false);
+    diagram.child.aRecordValidation.error = 'timeout';
+    assert.equal(isValidationSuccessful(diagram), false);
 });
 
 test('NSEC3 による A レコード不存在証明を検出する', () => {

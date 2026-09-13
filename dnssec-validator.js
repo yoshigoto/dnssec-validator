@@ -805,6 +805,22 @@ function createARecordValidation() {
     return { queried: true, recordsFound: false, signatures: [], trustChain: { dsMatchedKskKeyTags: [], dnskeyRrsetSignatures: [] } };
 }
 
+function isValidationSuccessful(diagram) {
+    const checks = diagram && diagram.checks;
+    if (!checks || !checks.dsSignature || !checks.dnskeySignature || !checks.dsKeyMatch) {
+        return false;
+    }
+
+    const aRecordValidation = diagram.child && diagram.child.aRecordValidation;
+    if (!aRecordValidation || !aRecordValidation.queried || aRecordValidation.error) {
+        return false;
+    }
+    if (aRecordValidation.recordsFound) {
+        return aRecordValidation.signatures.some(signature => signature.trustChainVerified === true);
+    }
+    return Boolean(aRecordValidation.denialProof && aRecordValidation.denialProof.verified === true);
+}
+
 function verifyDSSignature(dsRecords, rrsig, dnskeyRecord, zoneName) {
     const expirationCheck = checkSignatureExpiration(rrsig);
     if (!expirationCheck.valid) {
@@ -1531,10 +1547,11 @@ app.post('/api/validate', async (req, res) => {
             }
         }
 
-        if (matchFound) {
-            success = true;
-        } else {
+        success = isValidationSuccessful(diagram);
+        if (!matchFound) {
             logs.push(`親ゾーンの DS レコードと子ゾーンの DNSKEY レコードの突合に失敗しました。DNSSEC が正しく委任されていない可能性があります。`);
+        } else if (!success && diagram.child.aRecordValidation && !diagram.child.aRecordValidation.error) {
+            logs.push(`DNSSEC の署名または不在証明の検証に失敗しました。`);
         }
 
         sendJson(200, { success, logs, diagram });
@@ -1591,6 +1608,7 @@ module.exports = {
     checkSignatureExpiration,
     verifyMLDSASignature,
     createARecordValidation,
+    isValidationSuccessful,
     analyzeARecordNodataProof,
     findARecordNodataProof,
     findNxDomainProof,
