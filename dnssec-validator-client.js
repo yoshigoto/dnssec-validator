@@ -36,23 +36,23 @@ const aRecordValidationText = validation => {
     if (!validation.recordsFound) {
         const proof = validation.denialProof;
         if (proof && proof.type) {
-            const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : 'A レコード不在';
-            return [proof.type + ' による ' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), proof.keyTag ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) : '対応する RRSIG が見つかりませんでした'];
+            const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : 'Aレコード不在';
+            return [proof.type + 'による' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), proof.keyTag ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) : '対応するRRSIGが見つかりませんでした'];
         }
         const diagnostics = proof && proof.diagnostics ? proof.diagnostics : [];
         const observedNsec = proof && proof.observedNsec ? proof.observedNsec : [];
         const observedNsec3 = proof && proof.observedNsec3 ? proof.observedNsec3 : [];
-        const nsecLines = observedNsec.map(record => '応答 NSEC: ' + record.name + ' -> ' + record.nextDomain);
-        const nsec3Lines = observedNsec3.map(record => '応答 NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
-        return ['A レコードの探索: 失敗 ✕', 'NSEC/NSEC3 による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
+        const nsecLines = observedNsec.map(record => '応答NSEC: ' + record.name + ' -> ' + record.nextDomain);
+        const nsec3Lines = observedNsec3.map(record => '応答NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
+        return ['Aレコードの探索: 失敗 ✕', 'NSEC/NSEC3による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
     }
-    if (validation.signatures.length === 0) return ['A レコードへの RRSIG の探索: 失敗 ✕'];
+    if (validation.signatures.length === 0) return ['AレコードへのRRSIGの探索: 失敗 ✕'];
     const trustChain = validation.trustChain || {};
     const kskKeyTags = trustChain.dsMatchedKskKeyTags || [];
     const dnskeySignatures = trustChain.dnskeyRrsetSignatures || [];
     const lines = [
-        'DS -> KSK: ' + (kskKeyTags.length ? 'Key Tag ' + kskKeyTags.join(', ') + ' が一致 ✓' : '一致する KSK なし ✕'),
-        'KSK -> DNSKEY RRset: ' + (dnskeySignatures.length ? dnskeySignatures.map(signature => 'Key Tag ' + signature.kskKeyTag).join(', ') + ' による署名検証: 成功 ✓' : 'DS一致 KSK による署名検証: 失敗 ✕')
+        'DS -> KSK: ' + (kskKeyTags.length ? 'Key Tag' + kskKeyTags.join(', ') + 'が一致 ✓' : '一致するKSKなし ✕'),
+        'KSK -> DNSKEY RRset: ' + (dnskeySignatures.length ? dnskeySignatures.map(signature => 'Key Tag' + signature.kskKeyTag).join(', ') + 'による署名検証: 成功 ✓' : 'DS一致KSKによる署名検証: 失敗 ✕')
     ];
     return lines.concat(validation.signatures.map(signature => {
         const result = signature.verified === false
@@ -101,12 +101,12 @@ function renderDiagram(diagram) {
     document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
     document.getElementById('childZoneTitle').textContent = '子ゾーン / 委任先 (' + (diagram.child.server || '権威サーバー未確認') + ')';
     document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
-    setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵 (ZSKの秘密鍵はゾーンの RRset への署名に使われる)']);
+    setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵(ZSKの秘密鍵はゾーンのRRsetへの署名に使われる)']);
     setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
     setNodeContent('parentDs', 'DS', 'blue', [...dsText(diagram.parent.ds), '※子KSKのハッシュ値']);
-    setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY (KSK/ZSK) の署名検証用公開鍵 (KSKの秘密鍵は DNSKEY RRset への署名に使われる)']);
+    setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)']);
     setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
-    setNodeContent('childARecordValidation', '参考：ドメイン名に対する A レコード DNSSEC 検証', '', aRecordValidationText(diagram.child.aRecordValidation));
+    setNodeContent('childARecordValidation', '参考：ドメイン名に対するAレコードDNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
     const chainArrow = document.getElementById('chainArrow');
     chainArrow.className = 'arrow chain-arrow ' + (diagram.checks.dsKeyMatch ? 'good' : 'bad');
     chainArrow.replaceChildren();
@@ -146,7 +146,7 @@ async function validate(event) {
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
             statusBox.className = 'result-status-box ' + (data.success ? 'status-success' : 'status-failed');
-            statusBox.innerText = data.success ? '検証成功: DNSSEC の検証結果に問題はありません！' : '検証失敗: DNSSEC の署名または不在証明を検証できませんでした';
+            statusBox.innerText = data.success ? '検証成功: DNSSECの検証結果に問題はありません！' : '検証失敗: DNSSECの署名または不在証明を検証できませんでした';
             if (data.logs && data.logs.length > 0) { errorDetailsElement.textContent = sanitizeDisplayText(data.logs.join('\n')); errorDetailsElement.style.display = 'block'; }
             if (data.diagram) renderDiagram(data.diagram);
         }

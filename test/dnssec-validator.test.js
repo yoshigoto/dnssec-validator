@@ -156,7 +156,7 @@ test('RRSIG の未開始・期限切れを検出する', () => {
     assert.match(expired.reason, /期限が切れています/);
 });
 
-test('ゾーン頂点でも A レコード DNSSEC 検証を開始する', () => {
+test('ゾーン頂点でもAレコードDNSSEC検証を開始する', () => {
     const validation = createARecordValidation();
 
     assert.equal(validation.queried, true);
@@ -164,7 +164,7 @@ test('ゾーン頂点でも A レコード DNSSEC 検証を開始する', () => 
     assert.deepEqual(validation.signatures, []);
 });
 
-test('全信頼連鎖と A レコード署名が有効な場合だけ検証成功とする', () => {
+test('全信頼連鎖とAレコード署名が有効な場合だけ検証成功とする', () => {
     const diagram = {
         checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
         child: { aRecordValidation: { queried: true, recordsFound: true, signatures: [{ trustChainVerified: true }] } }
@@ -178,7 +178,7 @@ test('全信頼連鎖と A レコード署名が有効な場合だけ検証成�
     assert.equal(isValidationSuccessful(diagram), false);
 });
 
-test('A レコードがない場合は有効な不在証明を検証成功の必須条件とする', () => {
+test('Aレコードがない場合は有効な不在証明を検証成功の必須条件とする', () => {
     const diagram = {
         checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
         child: { aRecordValidation: { queried: true, recordsFound: false, signatures: [], denialProof: { verified: true } } }
@@ -191,7 +191,7 @@ test('A レコードがない場合は有効な不在証明を検証成功の必
     assert.equal(isValidationSuccessful(diagram), false);
 });
 
-test('NSEC3 による A レコード不存在証明を検出する', () => {
+test('NSEC3によるAレコード不存在証明を検出する', () => {
     const domain = 'www.example.test';
     const salt = Buffer.from('a1b2', 'hex');
     const iterations = 2;
@@ -209,7 +209,7 @@ test('NSEC3 による A レコード不存在証明を検出する', () => {
     }]), null);
 });
 
-test('NSEC3 の type bitmap が A を示す NODATA 証明の不成立理由を返す', () => {
+test('NSEC3のtype bitmapがAを示すNODATA証明の不成立理由を返す', () => {
     const domain = 'target.type.mismatch.nsec3.rsasha256.dnssec-check.jp';
     const salt = Buffer.alloc(0);
     const iterations = 1;
@@ -221,7 +221,7 @@ test('NSEC3 の type bitmap が A を示す NODATA 証明の不成立理由を�
     }]);
 
     assert.equal(result.record, null);
-    assert.match(result.diagnostics.join('\n'), /NSEC3 の type bitmap に A が含まれるため/);
+    assert.match(result.diagnostics.join('\n'), /NSEC3のtype bitmapにAが含まれるため/);
 });
 
 test('NSEC による NXDOMAIN 証明を構成する', () => {
@@ -553,7 +553,7 @@ test('不正な JSON は 400 を返す', async () => {
             body: '{"domain":'
         });
         assert.equal(response.statusCode, 400);
-        assert.equal(JSON.parse(response.body).error, 'JSON リクエストの形式が無効です');
+        assert.equal(JSON.parse(response.body).error, 'JSONリクエストの形式が無効です');
     } finally {
         await new Promise(resolve => server.close(resolve));
     }
