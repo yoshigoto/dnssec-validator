@@ -160,3 +160,6 @@ async function validate(event) {
 }
 
 document.getElementById('validateForm').addEventListener('submit', validate);
+if (domainInput.value) {
+    document.getElementById('validateForm').dispatchEvent(new Event('submit', { cancelable: true }));
+}
