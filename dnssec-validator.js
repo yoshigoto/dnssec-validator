@@ -1551,7 +1551,7 @@ app.post('/api/validate', async (req, res) => {
         if (!matchFound) {
             logs.push(`親ゾーンのDSレコードと子ゾーンのDNSKEYレコードの突合に失敗しました。DNSSECが正しく委任されていない可能性があります。`);
         } else if (!success && diagram.child.aRecordValidation && !diagram.child.aRecordValidation.error) {
-            logs.push(`DNSSECの署名または不在証明の検証に失敗しました。`);
+            logs.push(`ドメイン名に対するAレコードの署名または不在証明の検証に失敗しました。`);
         }
 
         sendJson(200, { success, logs, diagram });
