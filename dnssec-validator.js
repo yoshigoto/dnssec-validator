@@ -9,6 +9,7 @@ import dnsPacket from 'dns-packet';	// https://github.com/mafintosh/dns-packet
 import dnsTypes from 'dns-packet/types.js';
 import {
     ROOT_SERVER_BOOTSTRAP_IP,
+    getReferralAddressRecords,
     isInBailiwickGlue,
     normalizeDnsName as normalizeResolverDnsName,
     queryDirectlyUDP,
@@ -136,7 +137,11 @@ async function getARecord(domain, options = {}) {
     }
 
     const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
-    const ipAddress = await resolveIPv4(domain, { queryDirectlyUDP: options.queryDirectlyUDP });
+    const ipAddress = await resolveIPv4(domain, {
+        queryDirectlyUDP: options.queryDirectlyUDP,
+        knownAddresses: options.knownAddresses,
+        dnsResponseCache: options.dnsResponseCache
+    });
     if (!ipAddress) {
         throw new Error(`Aレコード取得失敗[${domain}]: ルートからの自己解決でIPアドレスが見つかりません`);
     }
@@ -157,7 +162,11 @@ async function getZoneApex(domain, options = {}) {
     let hasCnameOrDname = false;
 
     for (let i = 0; i < 10; i++) {
-        const currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs);
+        const currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
+            queryDirectlyUDP: options.queryDirectlyUDP,
+            knownAddresses: options.knownAddresses,
+            dnsResponseCache
+        });
         if (!currentServerIp) {
             throw new Error(`ネームサーバー [${currentNs}] の IP アドレスを自己解決できません`);
         }
@@ -227,16 +236,11 @@ async function getZoneApex(domain, options = {}) {
                     }
                 }
                 if (!chosenNsRecord) {
-                    // com/net の gtld-servers のように NS 名がゾーン外(sibling)でも、
-                    // 同じ委任応答の additional に含まれる A レコードは信頼できるグルーとして採用する
-                    for (const nsRecord of nsRecords) {
-                        const nsName = normalizeResolverDnsName(nsRecord.data);
-                        const glueA = additionals.find(record => record.type === 'A' && normalizeResolverDnsName(record.name) === nsName);
-                        if (glueA) {
-                            chosenNsRecord = nsRecord;
-                            chosenNsIp = glueA.data;
-                            break;
-                        }
+                    const referralAddresses = getReferralAddressRecords(additionals, nsRecords.map(record => normalizeResolverDnsName(record.data)));
+                    const referralA = referralAddresses.find(record => record.type === 'A');
+                    if (referralA) {
+                        chosenNsRecord = nsRecords.find(record => normalizeResolverDnsName(record.data) === normalizeResolverDnsName(referralA.name));
+                        chosenNsIp = referralA.data;
                     }
                 }
                 if (!chosenNsRecord) {

@@ -312,6 +312,23 @@ test('Aレコード解決を dns-self-resolver に委譲する', async () => {
     assert.equal(result, '192.0.2.20');
 });
 
+test('既知のネームサーバー情報を自己解決へ渡す', async () => {
+    let dependencies;
+    const result = await getARecord('known.example.test', {
+        knownAddresses: new Map([['known.example.test', '192.0.2.21']]),
+        dnsResponseCache: new Map(),
+        resolveHostnameIPv4Self: async (hostname, receivedDependencies) => {
+            assert.equal(hostname, 'known.example.test');
+            dependencies = receivedDependencies;
+            return '192.0.2.21';
+        }
+    });
+
+    assert.equal(result, '192.0.2.21');
+    assert.ok(dependencies.knownAddresses instanceof Map);
+    assert.ok(dependencies.dnsResponseCache instanceof Map);
+});
+
 test('DNSKEY の ZSK ビットを判定する', () => {
     assert.equal(isZoneSigningKey(256), true);
     assert.equal(isZoneSigningKey(257), true);
@@ -362,6 +379,34 @@ test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSEC
     });
 
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
+});
+
+test('out-of-bailiwick の参照アドレスを追加セクションから採用する', async () => {
+    const requests = [];
+    const result = await getZoneApex('www.child.example.test', {
+        initialNameserver: '192.0.2.1',
+        resolveHostnameIPv4Self: async () => {
+            throw new Error('参照アドレスの自己解決は不要');
+        },
+        queryDirectlyUDP: async (domain, serverIp) => {
+            requests.push(serverIp);
+            if (requests.length === 1) {
+                return {
+                    rcode: 'NOERROR',
+                    authorities: [{ name: 'child.example.test', type: 'NS', data: 'ns.external.test' }],
+                    additionals: [{ name: 'ns.external.test', type: 'A', data: '192.0.2.22' }]
+                };
+            }
+            return {
+                rcode: 'NOERROR',
+                flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                answers: [{ name: 'child.example.test', type: 'SOA', data: {} }]
+            };
+        }
+    });
+
+    assert.deepEqual(requests, ['192.0.2.1', '192.0.2.22']);
+    assert.equal(result.zoneApex, 'child.example.test');
 });
 
 test('委任先が同じ IP の場合も親子同居として探索結果を保持する', async () => {
