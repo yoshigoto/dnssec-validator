@@ -109,7 +109,7 @@ Content-Type: application/json
 
 ## 検証方式
 
-アプリケーションは OS のフルサービスリゾルバーに依存せず、ルートサーバー（`198.41.0.4`）から委任を辿って DNS レコードを取得します。UDP 応答が切り詰められている場合は TCP に切り替えます。
+アプリケーションは `dns-self-resolver` を使い、OS のフルサービスリゾルバーに依存せず、ルートサーバー（`198.41.0.4`）から委任を辿ってネームサーバー名を解決します。DNSSEC レコードの取得では DO ビットを設定し、UDP 応答が切り詰められている場合は TCP に切り替えます。
 
 署名検証では、次の DNSSEC アルゴリズムに対応しています。
 
@@ -118,7 +118,7 @@ Content-Type: application/json
 - EdDSA: ED25519、ED448
 - ML-DSA: ML-DSA-44
 
-委任情報とネームサーバーの IP アドレスは、TTL を使ったプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 30 回のレート制限があります。
+ネームサーバーの IP アドレスは `dns-self-resolver` の TTL 付きプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 30 回のレート制限があります。
 
 ## ファイル構成
 
@@ -134,6 +134,7 @@ Content-Type: application/json
 
 - [Express](https://expressjs.com/): Web サーバーと API
 - [dns-packet](https://github.com/mafintosh/dns-packet): DNS パケットのエンコード / デコード
+- [dns-self-resolver](https://github.com/yoshigoto/dns-self-resolver): DNS 問い合わせ、ネームサーバー名の自己解決、グルー判定
 
 ## 注意事項
 

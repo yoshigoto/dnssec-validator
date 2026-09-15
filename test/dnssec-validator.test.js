@@ -1,16 +1,16 @@
-const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
-const dnsPacket = require('dns-packet');
-const http = require('node:http');
-const net = require('node:net');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import http from 'node:http';
+import test from 'node:test';
 
-const {
+import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
+import dnsPacket from 'dns-packet';
+
+import {
     app,
     validateDomainName,
     normalizeDomainName,
     checkRateLimit,
-    queryDnsTcp,
     getZoneApex,
     getARecord,
     getResourceRecord,
@@ -28,9 +28,8 @@ const {
     nsec3Hash,
     toBase32Hex,
     analyzeARecordNodataProof,
-    createTimeoutGuardedResponder,
-} = require('../dnssec-validator');
-const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js');
+    createTimeoutGuardedResponder
+} from '../dnssec-validator.js';
 
 function request(server, { method = 'GET', path = '/', body, headers = {} } = {}) {
     return new Promise((resolve, reject) => {
@@ -302,39 +301,15 @@ test('別の NSEC3 が存在する自己ループ NSEC3 を NXDOMAIN 証明に�
     assert.match(proof.diagnostics.join('\n'), /ワイルドカード/);
 });
 
-test('委任先ゾーン外のグルーを使わず、次の NS にフォールバックする', async () => {
-    const calls = [];
+test('Aレコード解決を dns-self-resolver に委譲する', async () => {
     const result = await getARecord('host.glue-fallback.test', {
-        queryUdp: async serverIp => {
-            calls.push(serverIp);
-            if (serverIp === '198.41.0.4') {
-                return dnsPacket.encode({
-                    type: 'response',
-                    answers: [],
-                    authorities: [
-                        { name: 'glue-fallback.test', type: 'NS', data: 'ns1.glue-fallback.test', ttl: 300 },
-                        { name: 'glue-fallback.test', type: 'NS', data: 'ns2.external.test', ttl: 300 }
-                    ],
-                    additionals: [
-                        { name: 'ns1.glue-fallback.test', type: 'A', data: '192.0.2.11', ttl: 300 },
-                        { name: 'ns2.external.test', type: 'A', data: '192.0.2.12', ttl: 300 }
-                    ]
-                });
-            }
-            if (serverIp === '192.0.2.11') {
-                throw new Error('優先 NS の通信失敗');
-            }
-            assert.equal(serverIp, 'ns2.external.test');
-            return dnsPacket.encode({
-                type: 'response',
-                answers: [{ name: 'host.glue-fallback.test', type: 'A', data: '192.0.2.20' }],
-                authorities: []
-            });
+        resolveHostnameIPv4Self: async hostname => {
+            assert.equal(hostname, 'host.glue-fallback.test');
+            return '192.0.2.20';
         }
     });
 
     assert.equal(result, '192.0.2.20');
-    assert.deepEqual(calls, ['198.41.0.4', '192.0.2.11', 'ns2.external.test']);
 });
 
 test('DNSKEY の ZSK ビットを判定する', () => {
@@ -346,8 +321,8 @@ test('DNSKEY の ZSK ビットを判定する', () => {
 test('権威 SOA 応答からゾーン頂点を確定する', async () => {
     const result = await getZoneApex('www.example.test', {
         initialNameserver: '192.0.2.1',
-        queryUdp: async () => dnsPacket.encode({
-            type: 'response',
+        queryDirectlyUDP: async () => ({
+            rcode: 'NOERROR',
             flags: dnsPacket.AUTHORITATIVE_ANSWER,
             answers: [{
                 name: 'example.test',
@@ -370,49 +345,15 @@ test('権威 SOA 応答からゾーン頂点を確定する', async () => {
     assert.equal(result.currentNs, '192.0.2.1');
 });
 
-test('FORMERR の場合は EDNS なしで再試行する', async () => {
-    let queryCount = 0;
-    const result = await getZoneApex('www.formerr.test', {
-        initialNameserver: '192.0.2.2',
-        queryUdp: async () => {
-            queryCount++;
-            if (queryCount === 1) {
-                return dnsPacket.encode({ type: 'response', rcode: 'FORMERR' });
-            }
-            return dnsPacket.encode({
-                type: 'response',
-                flags: dnsPacket.AUTHORITATIVE_ANSWER,
-                answers: [{
-                    name: 'formerr.test',
-                    type: 'SOA',
-                    data: {
-                        mname: 'ns.formerr.test',
-                        rname: 'hostmaster.formerr.test',
-                        serial: 1,
-                        refresh: 3600,
-                        retry: 600,
-                        expire: 86400,
-                        minimum: 300
-                    }
-                }]
-            });
-        }
-    });
-
-    assert.equal(queryCount, 2);
-    assert.equal(result.zoneApex, 'formerr.test');
-});
-
-test('UDP 切り詰め応答を TCP で再取得する', async () => {
-    const calls = [];
+test('DOビット付き応答からDNSSECリソースレコードを抽出する', async () => {
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
-        queryUdp: async () => {
-            calls.push('udp');
-            return dnsPacket.encode({ type: 'response', flags: dnsPacket.TRUNCATED_RESPONSE, answers: [] });
-        },
-        queryTcp: async () => {
-            calls.push('tcp');
-            return dnsPacket.streamEncode({
+        queryUdp: async (serverIp, query) => {
+            assert.equal(serverIp, '192.0.2.3');
+            const decodedQuery = dnsPacket.decode(query);
+            assert.equal(decodedQuery.questions[0].name, 'example.test');
+            assert.equal(decodedQuery.questions[0].type, 'A');
+            assert.ok((decodedQuery.additionals[0].flags & dnsPacket.DNSSEC_OK) !== 0);
+            return dnsPacket.encode({
                 type: 'response',
                 answers: [{ name: 'example.test', type: 'A', data: '192.0.2.10' }],
                 authorities: []
@@ -420,36 +361,7 @@ test('UDP 切り詰め応答を TCP で再取得する', async () => {
         }
     });
 
-    assert.deepEqual(calls, ['udp', 'tcp']);
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
-});
-
-test('TCP DNS 応答は全長受信後にリモート close を待たず完了する', async () => {
-    const server = net.createServer(socket => {
-        socket.once('data', () => {
-            socket.write(dnsPacket.streamEncode({
-                type: 'response',
-                answers: [{ name: 'example.test', type: 'A', data: '192.0.2.10' }]
-            }));
-            setTimeout(() => socket.end(), 150);
-        });
-    });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    try {
-        const query = dnsPacket.streamEncode({
-            type: 'query',
-            questions: [{ type: 'A', name: 'example.test' }]
-        });
-        const start = Date.now();
-        const response = await queryDnsTcp('127.0.0.1', query, server.address().port);
-        const elapsed = Date.now() - start;
-        const decoded = dnsPacket.streamDecode(response);
-
-        assert.equal(decoded.answers[0].data, '192.0.2.10');
-        assert.ok(elapsed < 100, `TCP 応答完了が遅すぎます: ${elapsed}ms`);
-    } finally {
-        await new Promise(resolve => server.close(resolve));
-    }
 });
 
 test('委任先が同じ IP の場合も親子同居として探索結果を保持する', async () => {
@@ -457,17 +369,17 @@ test('委任先が同じ IP の場合も親子同居として探索結果を保�
     const sharedNameserver = '192.0.2.53';
     const result = await getZoneApex('host.co-located.test', {
         initialNameserver: sharedNameserver,
-        queryUdp: async serverIp => {
+        queryDirectlyUDP: async (domain, serverIp) => {
             requests.push(serverIp);
             if (requests.length === 1) {
-                return dnsPacket.encode({
-                    type: 'response',
+                return {
+                    rcode: 'NOERROR',
                     authorities: [{ name: 'co-located.test', type: 'NS', data: 'ns.co-located.test', ttl: 300 }],
                     additionals: [{ name: 'ns.co-located.test', type: 'A', data: sharedNameserver, ttl: 300 }]
-                });
+                };
             }
-            return dnsPacket.encode({
-                type: 'response',
+            return {
+                rcode: 'NOERROR',
                 flags: dnsPacket.AUTHORITATIVE_ANSWER,
                 answers: [{
                     name: 'co-located.test',
@@ -482,7 +394,7 @@ test('委任先が同じ IP の場合も親子同居として探索結果を保�
                         minimum: 300
                     }
                 }]
-            });
+            };
         }
     });
 
@@ -494,9 +406,10 @@ test('委任先が同じ IP の場合も親子同居として探索結果を保�
 
 test('親子ゾーンの NS RRset を委任応答から個別に保持する', async () => {
     const responses = [
-        { authorities: [{ name: 'parent.test', type: 'NS', data: 'ns1.parent.test', ttl: 300 }] },
-        { authorities: [{ name: 'child.parent.test', type: 'NS', data: 'ns1.child.test', ttl: 300 }, { name: 'child.parent.test', type: 'NS', data: 'ns2.child.test', ttl: 300 }] },
+        { rcode: 'NOERROR', authorities: [{ name: 'parent.test', type: 'NS', data: 'ns1.parent.test', ttl: 300 }] },
+        { rcode: 'NOERROR', authorities: [{ name: 'child.parent.test', type: 'NS', data: 'ns1.child.test', ttl: 300 }, { name: 'child.parent.test', type: 'NS', data: 'ns2.child.test', ttl: 300 }] },
         {
+            rcode: 'NOERROR',
             flags: dnsPacket.AUTHORITATIVE_ANSWER,
             answers: [{
                 name: 'child.parent.test', type: 'SOA',
@@ -506,7 +419,11 @@ test('親子ゾーンの NS RRset を委任応答から個別に保持する', a
     ];
     const result = await getZoneApex('host.child.parent.test', {
         initialNameserver: '192.0.2.1',
-        queryUdp: async () => dnsPacket.encode({ type: 'response', ...responses.shift() })
+        resolveHostnameIPv4Self: async hostname => ({
+            'ns1.parent.test': '192.0.2.2',
+            'ns1.child.test': '192.0.2.3'
+        })[hostname] || null,
+        queryDirectlyUDP: async () => responses.shift()
     });
 
     assert.deepEqual(result.parentNameservers, ['ns1.parent.test']);

@@ -1,10 +1,22 @@
-const express = require('express');
-const net = require('net');
-const dgram = require('dgram');
-const dnsPacket = require('dns-packet');	// https://github.com/mafintosh/dns-packet
-const dnsTypes = require('dns-packet/types');
-const crypto = require('crypto');
-const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js');
+import crypto from 'node:crypto';
+import dgram from 'node:dgram';
+import net from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
+import dnsPacket from 'dns-packet';	// https://github.com/mafintosh/dns-packet
+import dnsTypes from 'dns-packet/types.js';
+import {
+    ROOT_SERVER_BOOTSTRAP_IP,
+    isInBailiwickGlue,
+    normalizeDnsName as normalizeResolverDnsName,
+    queryDirectlyUDP,
+    resolveHostnameIPv4Self
+} from 'dns-self-resolver';
+import express from 'express';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.disable('x-powered-by');
@@ -21,8 +33,7 @@ app.use((req, res, next) => {
 });
 
 // --- 定数定義 ---
-const ROOT_NAMESERVER = '198.41.0.4'; // a.root-servers.net
-const MAX_RECURSION_DEPTH = 10;
+const ROOT_NAMESERVER = ROOT_SERVER_BOOTSTRAP_IP;
 const DNS_QUERY_TIMEOUT = 5000;
 const DNS_UDP_PAYLOAD_SIZE = 1232;
 const MAX_DOMAIN_LENGTH = 253;
@@ -98,201 +109,64 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-// --- キャッシュ: ルートから辿った委任情報 (ゾーン→ネームサーバー名) とネームサーバー名→IPアドレスの解決結果をgetARecord/getZoneApex間で使い回す ---
-const DEFAULT_CACHE_TTL_MS = 300000; // レコードにTTLが無い場合のフォールバック
-const delegationCache = new Map(); // zone(小文字・末尾ドット無し) -> { ns, parentNs, expiresAt }
-const nameserverIpCache = new Map(); // ホスト名(小文字・末尾ドット無し) -> { ip, expiresAt }
-
-function normalizeCacheKey(name) {
-    return (name || '').toLowerCase().replace(/\.$/, '') || '.';
-}
-
-// グルーは委任先ゾーン内のネームサーバー名に限って信頼する。
-function isInBailiwick(name, zone) {
-    const normalizedName = normalizeCacheKey(name);
-    const normalizedZone = normalizeCacheKey(zone);
-    return normalizedName === normalizedZone || normalizedName.endsWith('.' + normalizedZone);
-}
-
-// --- ヘルパー関数: 委任情報 (ゾーン→ネームサーバー名/親ネームサーバー名) をキャッシュに記録 ---
-function cacheDelegation(zone, ns, parentNs, ttlSeconds) {
-    if (!zone || !ns) return;
-    const ttlMs = (typeof ttlSeconds === 'number' && ttlSeconds > 0) ? ttlSeconds * 1000 : DEFAULT_CACHE_TTL_MS;
-    delegationCache.set(normalizeCacheKey(zone), { ns, parentNs: parentNs || '', expiresAt: Date.now() + ttlMs });
-}
-
-// --- ヘルパー関数: ドメイン名に最も近い委任情報をキャッシュから探す (ルートからの再探索を省略) ---
-function findCachedDelegation(domain) {
-    const labels = normalizeCacheKey(domain).split('.');
-    for (let i = 0; i < labels.length; i++) {
-        const zone = labels.slice(i).join('.') || '.';
-        const cached = delegationCache.get(zone);
-        if (!cached) continue;
-        if (Date.now() > cached.expiresAt) {
-            delegationCache.delete(zone);
-            continue;
-        }
-        return cached;
-    }
-    return null;
-}
-
-// --- ヘルパー関数: ネームサーバー名のIPアドレス解決結果をキャッシュに記録 ---
-function cacheNameserverIp(hostname, ip, ttlSeconds) {
-    if (!hostname || !ip) return;
-    const ttlMs = (typeof ttlSeconds === 'number' && ttlSeconds > 0) ? ttlSeconds * 1000 : DEFAULT_CACHE_TTL_MS;
-    nameserverIpCache.set(normalizeCacheKey(hostname), { ip, expiresAt: Date.now() + ttlMs });
-}
-
-// --- ヘルパー関数: キャッシュ済みのネームサーバーIPアドレスを取得 ---
-function getCachedNameserverIp(hostname) {
-    const key = normalizeCacheKey(hostname);
-    const cached = nameserverIpCache.get(key);
-    if (!cached) return null;
-    if (Date.now() > cached.expiresAt) {
-        nameserverIpCache.delete(key);
-        return null;
-    }
-    return cached.ip;
-}
-
-// --- ヘルパー関数: キャッシュされた委任先が解決対象自身のホスト名と同じ (自己参照) 場合は使わない ---
-function isUsableCachedNs(candidateNs, targetDomain) {
-    if (!candidateNs) return false;
-    if (net.isIP(candidateNs)) return true;
-    return normalizeCacheKey(candidateNs) !== normalizeCacheKey(targetDomain);
-}
-
-// --- ネームサーバー名解決が自己参照して循環しているかを検出するための進行中セット ---
-const inFlightNsResolutions = new Set();
-
-// --- ヘルパー関数: ネームサーバー名をIPアドレスに解決 (フルサービスリゾルバーやOSの名前解決には依存せず、キャッシュとgetARecordで自前解決) ---
-async function resolveNameserverIp(serverIp) {
-    if (net.isIP(serverIp)) {
-        return serverIp;
-    }
-
-    const cachedIp = getCachedNameserverIp(serverIp);
-    if (cachedIp) {
-        return cachedIp;
-    }
-
-    const key = normalizeCacheKey(serverIp);
-    if (inFlightNsResolutions.has(key)) {
-        throw new Error(`ネームサーバー名[${serverIp}]の解決が循環参照になっています (グルーレコードが不足している可能性があります)`);
-    }
-
-    inFlightNsResolutions.add(key);
-    try {
-        const ip = await getARecord(serverIp);
-        cacheNameserverIp(serverIp, ip);
-        return ip;
-    } finally {
-        inFlightNsResolutions.delete(key);
-    }
-}
-
-// --- ヘルパー関数: 指定したIPアドレスにUDPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
-function queryDnsUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
+function queryDnssecUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
     return new Promise((resolve, reject) => {
-        (async () => {
-            const resolvedIp = net.isIP(serverIp) ? serverIp : await resolveNameserverIp(serverIp);
+        const client = dgram.createSocket(net.isIPv6(serverIp) ? 'udp6' : 'udp4');
+        const timer = setTimeout(() => {
+            client.close();
+            reject(new Error(`タイムアウト (${timeout}ms): ${serverIp}`));
+        }, timeout);
 
-            const client = dgram.createSocket('udp4');
-            const timer = setTimeout(() => {
-                client.close();
-                reject(new Error(`タイムアウト (${timeout}ms): ${serverIp}`));
-            }, timeout);
-
-            client.on('message', (msg) => {
-                clearTimeout(timer);
-                client.close();
-                resolve(msg);
-            });
-
-            client.on('error', (err) => {
-                clearTimeout(timer);
-                client.close();
-                reject(err);
-            });
-
-            client.send(buf, 0, buf.length, 53, resolvedIp);
-        })().catch(reject);
+        client.on('message', msg => {
+            clearTimeout(timer);
+            client.close();
+            resolve(msg);
+        });
+        client.on('error', err => {
+            clearTimeout(timer);
+            client.close();
+            reject(err);
+        });
+        client.send(buf, 0, buf.length, 53, serverIp);
     });
 }
 
-// --- ヘルパー関数: 指定したIPアドレスにTCPでDNSクエリを送信 (ホスト名の場合は事前に名前解決) ---
-function queryDnsTcp(serverIp, buf, port = 53) {
+function queryDnssecTcp(serverIp, buf, port = 53) {
     return new Promise((resolve, reject) => {
-        (async () => {
-            const resolvedIp = net.isIP(serverIp) ? serverIp : await resolveNameserverIp(serverIp);
+        const client = new net.Socket();
+        let responseBuffer = Buffer.alloc(0);
+        let settled = false;
 
-            var responseBuffer = null;
-            var expectedLength = 0;
-            var settled = false;
-            const client = new net.Socket();
+        const finish = (error, message) => {
+            if (settled) return;
+            settled = true;
+            client.destroy();
+            if (error) reject(error);
+            else resolve(message);
+        };
 
-            const finish = (err, msg) => {
-                if (settled) return;
-                settled = true;
-                client.destroy();
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(msg);
-                }
-            };
-
-            client.connect(port, resolvedIp, () => {
-                client.write(buf);
-            });
-
-            client.on('data', (data) => {
-                if (responseBuffer == null) {
-                    if (data.byteLength > 1) {
-                        const plen = data.readUInt16BE(0);
-                        expectedLength = plen;
-                        responseBuffer = Buffer.from(data);
-                    }
-                } else {
-                    responseBuffer = Buffer.concat([responseBuffer, data]);
-                }
-                if (expectedLength > 0 && responseBuffer.byteLength >= expectedLength + 2) {
-                    finish(null, responseBuffer);
-                }
-            });
-
-            client.on('error', (err) => {
-                finish(err);
-            });
-
-            client.on('close', (hadError) => {
-                if (settled) return;
-                if (!hadError && responseBuffer) {
-                    finish(null, responseBuffer);
-                } else if (hadError) {
-                    finish(new Error(`TCP DNSクエリ失敗: ${serverIp}`));
-                }
-            });
-        })().catch(reject);
+        client.setTimeout(DNS_QUERY_TIMEOUT, () => finish(new Error(`タイムアウト (${DNS_QUERY_TIMEOUT}ms): ${serverIp}`)));
+        client.connect(port, serverIp, () => client.write(buf));
+        client.on('data', data => {
+            responseBuffer = Buffer.concat([responseBuffer, data]);
+            if (responseBuffer.length >= 2 && responseBuffer.length >= responseBuffer.readUInt16BE(0) + 2) {
+                finish(null, responseBuffer);
+            }
+        });
+        client.on('error', err => finish(err));
     });
 }
 
-// --- ヘルパー関数: 指定されたタイプのリソースレコードを取得する ---
+// DNSSEC 応答には DO ビットが必須。dns-self-resolver が問い合わせオプションに対応するまでは専用 transport を使う。
 async function getResourceRecord(domain, serverIp, rType, options = {}) {
-    const queryUdp = options.queryUdp || queryDnsUdp;
-    const queryTcp = options.queryTcp || queryDnsTcp;
-    let resourceRecords = [];
-    let rrsigRecords = [];
-    let denialRecords = [];
-    let denialRrsigRecords = [];
-
+    const queryUdp = options.queryUdp || queryDnssecUdp;
+    const queryTcp = options.queryTcp || queryDnssecTcp;
     let buf = dnsPacket.encode({
         type: 'query',
         id: Math.floor(Math.random() * 65535),
         questions: [{ type: rType, name: domain }],
         additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE, flags: dnsPacket.DNSSEC_OK }]
-        });
+    });
     let msg = await queryUdp(serverIp, buf);
     let res = dnsPacket.decode(msg);
 
@@ -307,89 +181,38 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
         res = dnsPacket.streamDecode(msg);
     }
 
-    resourceRecords = res.answers.filter(a => a.type === rType);
+    const answers = res.answers || [];
+    const resourceRecords = answers.filter(a => a.type === rType);
+    let rrsigRecords = [];
     if (resourceRecords.length !== 0) {
-        rrsigRecords = res.answers.filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType);
+        rrsigRecords = answers.filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType);
     }
 
     const authorityRecords = res.authorities || [];
-    denialRecords = authorityRecords.filter(record => record.type === 'NSEC' || record.type === 'NSEC3');
-    denialRrsigRecords = authorityRecords.filter(record => record.type === 'RRSIG' && (record.data.typeCovered === 'NSEC' || record.data.typeCovered === 'NSEC3'));
+    const denialRecords = authorityRecords.filter(record => record.type === 'NSEC' || record.type === 'NSEC3');
+    const denialRrsigRecords = authorityRecords.filter(record => record.type === 'RRSIG' && (record.data.typeCovered === 'NSEC' || record.data.typeCovered === 'NSEC3'));
     return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
 // --- ヘルパー関数: Aレコードを取得する ---
-// ネームサーバー名の解決にも使われるため、循環参照を避けるため常にルートから辿る (委任キャッシュは使わない)
 async function getARecord(domain, options = {}) {
-    const queryUdp = options.queryUdp || queryDnsUdp;
-    // domainが既にIPアドレスの場合は問い合わせ不要
     if (net.isIP(domain)) {
         return domain;
     }
 
-    let currentNs = ROOT_NAMESERVER;
-    let ipAddress = '';
-    let candidateQueue = []; // 現在の委任レベルで未試行のNS候補 (優先NSが失敗した際のフォールバック用)
-
-    for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
-        try {
-            const buf = dnsPacket.encode({
-                type: 'query',
-                id: Math.floor(Math.random() * 65535),
-                questions: [{ type: 'A', name: domain }],
-                additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
-            });
-            const msg = await queryUdp(currentNs, buf);
-            const res = dnsPacket.decode(msg);
-            const aRecord = res.answers.find(a => a.type === 'A');
-            if (aRecord) {
-                ipAddress = aRecord.data;
-                break;
-            }
-            const nsAuthRecords = res.authorities.filter(a => a.type === 'NS');
-            if (nsAuthRecords.length === 0) {
-                throw new Error(`${currentNs}からAレコードの委任情報が得られません`);
-            }
-            // 委任先ゾーン内のグルーレコードだけを優先候補にし、残りはフォールバック候補として保持する (捨てない)
-            const candidates = nsAuthRecords.map(nsAuthRecord => {
-                const glueA = isInBailiwick(nsAuthRecord.data, nsAuthRecord.name)
-                    ? res.additionals.find(a => a.type === 'A' && a.name === nsAuthRecord.data)
-                    : null;
-                cacheDelegation(nsAuthRecord.name, nsAuthRecord.data, currentNs, nsAuthRecord.ttl);
-                if (glueA) {
-                    cacheNameserverIp(nsAuthRecord.data, glueA.data, glueA.ttl);
-                }
-                return { name: nsAuthRecord.data, ip: glueA ? glueA.data : null };
-            });
-            candidates.sort((a, b) => (a.ip ? 0 : 1) - (b.ip ? 0 : 1));
-
-            const chosen = candidates.shift();
-            candidateQueue = candidates;
-            currentNs = chosen.ip || chosen.name;
-        } catch (err) {
-            // 優先NSが失敗した場合、同じ委任レベルで捨てていない他の NS 候補を試す
-            if (candidateQueue.length > 0) {
-                const next = candidateQueue.shift();
-                currentNs = next.ip || next.name;
-                continue;
-            }
-            if (i === MAX_RECURSION_DEPTH - 1) {
-                throw new Error(`Aレコード取得失敗[${domain}]: ${err.message}`);
-            }
-        }
-    }
-    
+    const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
+    const ipAddress = await resolveIPv4(domain, { queryDirectlyUDP: options.queryDirectlyUDP });
     if (!ipAddress) {
-        throw new Error(`Aレコード取得失敗[${domain}]: ${MAX_RECURSION_DEPTH}回の再帰でもIPアドレスが見つかりません`);
+        throw new Error(`Aレコード取得失敗[${domain}]: ルートからの自己解決でIPアドレスが見つかりません`);
     }
-    
     return ipAddress;
 }
 
 // --- ヘルパー関数: ゾーン頂点をルートから辿って取得する ---
 async function getZoneApex(domain, options = {}) {
-    const queryUdp = options.queryUdp || queryDnsUdp;
-    const queryTcp = options.queryTcp || queryDnsTcp;
+    const queryUdp = options.queryDirectlyUDP || queryDirectlyUDP;
+    const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
+    const dnsResponseCache = options.dnsResponseCache || new Map();
     let currentNs = options.initialNameserver || ROOT_NAMESERVER;
     let parentNs = '';
     let parentNameservers = [];
@@ -399,36 +222,11 @@ async function getZoneApex(domain, options = {}) {
     let hasCnameOrDname = false;
 
     for (let i = 0; i < 10; i++) {
-        let buf = dnsPacket.encode({
-            type: 'query',
-            id: Math.floor(Math.random() * 65535),
-            questions: [{ type: 'SOA', name: domain }],
-            additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE }]
-        });
-        let msg = await queryUdp(currentNs, buf);
-        let res = dnsPacket.decode(msg);
-
-        // EDNS0を処理できない権威サーバーはFORMERRを返すため、OPTを外して一度だけ再試行する
-        if (res.rcode === 'FORMERR') {
-            buf = dnsPacket.encode({
-                type: 'query',
-                id: Math.floor(Math.random() * 65535),
-                questions: [{ type: 'SOA', name: domain }]
-            });
-            msg = await queryUdp(currentNs, buf);
-            res = dnsPacket.decode(msg);
+        const currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs);
+        if (!currentServerIp) {
+            throw new Error(`ネームサーバー [${currentNs}] の IP アドレスを自己解決できません`);
         }
-
-        // TC(Truncated)フラグが立っている場合はTCPで再取得する
-        if (res.flags & dnsPacket.TRUNCATED_RESPONSE) {
-            buf = dnsPacket.streamEncode({
-                type: 'query',
-                id: Math.floor(Math.random() * 65535),
-                questions: [{ type: 'SOA', name: domain }]
-            });
-            msg = await queryTcp(currentNs, buf);
-            res = dnsPacket.streamDecode(msg);
-        }
+        const res = await queryUdp(domain, currentServerIp, dnsResponseCache, 'SOA');
 
         if (res.error === 'TIMEOUT' || res.error === 'SEND_ERROR' || res.error === 'DECODE_ERROR') {
             continue;
@@ -485,20 +283,17 @@ async function getZoneApex(domain, options = {}) {
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
                 for (const nsRecord of nsRecords) {
-                    const glueA = isInBailiwick(nsRecord.data, nsRecord.name)
-                        ? additionals.find(a => a.type === 'A' && a.name === nsRecord.data)
-                        : null;
+                    const nsNames = [normalizeResolverDnsName(nsRecord.data)];
+                    const glueA = additionals.find(record => record.type === 'A' && isInBailiwickGlue(record, nsNames, nsRecord.name));
                     if (glueA) {
                         chosenNsRecord = nsRecord;
                         chosenNsIp = glueA.data;
-                        cacheNameserverIp(nsRecord.data, glueA.data, glueA.ttl);
                         break;
                     }
                 }
                 if (!chosenNsRecord) {
                     chosenNsRecord = nsRecords[0];
                 }
-                cacheDelegation(chosenNsRecord.name, chosenNsRecord.data, currentNs, chosenNsRecord.ttl);
                 parentNs = currentNs;
                 currentNs = chosenNsIp || chosenNsRecord.data;
             }
@@ -1585,18 +1380,17 @@ app.use((error, req, res, next) => {
 
 const PORT = 3002;
 
-if (require.main === module) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
     app.listen(PORT, () => {
         console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
     });
 }
 
-module.exports = {
+export {
     app,
     validateDomainName,
     normalizeDomainName,
     checkRateLimit,
-    queryDnsTcp,
     getZoneApex,
     getARecord,
     getResourceRecord,
