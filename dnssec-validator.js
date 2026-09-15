@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1314,9 +1315,24 @@ app.use((error, req, res, next) => {
 
 const PORT = 3002;
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    app.listen(PORT, () => {
+function isMainModule() {
+    const entryPoint = process.argv[1];
+    if (!entryPoint) return false;
+    const modulePath = fileURLToPath(import.meta.url);
+    try {
+        return realpathSync(entryPoint) === realpathSync(modulePath);
+    } catch {
+        return path.resolve(entryPoint) === modulePath;
+    }
+}
+
+if (isMainModule()) {
+    const server = app.listen(PORT, () => {
         console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
+    });
+    server.on('error', error => {
+        console.error(`Webサーバーの起動に失敗しました: ${error.message}`);
+        process.exitCode = 1;
     });
 }
 
