@@ -227,6 +227,19 @@ async function getZoneApex(domain, options = {}) {
                     }
                 }
                 if (!chosenNsRecord) {
+                    // com/net の gtld-servers のように NS 名がゾーン外(sibling)でも、
+                    // 同じ委任応答の additional に含まれる A レコードは信頼できるグルーとして採用する
+                    for (const nsRecord of nsRecords) {
+                        const nsName = normalizeResolverDnsName(nsRecord.data);
+                        const glueA = additionals.find(record => record.type === 'A' && normalizeResolverDnsName(record.name) === nsName);
+                        if (glueA) {
+                            chosenNsRecord = nsRecord;
+                            chosenNsIp = glueA.data;
+                            break;
+                        }
+                    }
+                }
+                if (!chosenNsRecord) {
                     chosenNsRecord = nsRecords[0];
                 }
                 parentNs = currentNs;
