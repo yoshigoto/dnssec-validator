@@ -1,0 +1,30 @@
+#!/bin/sh
+
+# PROVIDE: dnssec_validator
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="dnssec_validator"
+rcvar="dnssec_validator_enable"
+
+load_rc_config "$name"
+
+: ${dnssec_validator_enable:="NO"}
+: ${dnssec_validator_chdir:="/usr/local/www/dnssec-validator"}
+: ${dnssec_validator_node:="/usr/local/bin/node"}
+: ${dnssec_validator_script:="dnssec-validator.js"}
+: ${dnssec_validator_pidfile:="/var/run/${name}.pid"}
+: ${dnssec_validator_log:="/var/log/${name}.log"}
+
+pidfile="${dnssec_validator_pidfile}"
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} -o ${dnssec_validator_log} ${dnssec_validator_node} ${dnssec_validator_chdir}/${dnssec_validator_script}"
+stop_cmd=${name}_stop
+
+dnssec_validator_stop() {
+	test -e ${pidfile} && kill "$(cat ${pidfile})"
+}
+
+run_rc_command "$1"
