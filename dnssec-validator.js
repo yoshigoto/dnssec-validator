@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import dgram from 'node:dgram';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,8 +33,7 @@ app.use((req, res, next) => {
 
 // --- 定数定義 ---
 const ROOT_NAMESERVER = ROOT_SERVER_BOOTSTRAP_IP;
-const DNS_QUERY_TIMEOUT = 5000;
-const DNS_UDP_PAYLOAD_SIZE = 1232;
+const dnssecResponseCache = new Map();
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
@@ -109,76 +107,12 @@ function checkRateLimit(clientIp) {
     return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - record.count };
 }
 
-function queryDnssecUdp(serverIp, buf, timeout = DNS_QUERY_TIMEOUT) {
-    return new Promise((resolve, reject) => {
-        const client = dgram.createSocket(net.isIPv6(serverIp) ? 'udp6' : 'udp4');
-        const timer = setTimeout(() => {
-            client.close();
-            reject(new Error(`タイムアウト (${timeout}ms): ${serverIp}`));
-        }, timeout);
-
-        client.on('message', msg => {
-            clearTimeout(timer);
-            client.close();
-            resolve(msg);
-        });
-        client.on('error', err => {
-            clearTimeout(timer);
-            client.close();
-            reject(err);
-        });
-        client.send(buf, 0, buf.length, 53, serverIp);
-    });
-}
-
-function queryDnssecTcp(serverIp, buf, port = 53) {
-    return new Promise((resolve, reject) => {
-        const client = new net.Socket();
-        let responseBuffer = Buffer.alloc(0);
-        let settled = false;
-
-        const finish = (error, message) => {
-            if (settled) return;
-            settled = true;
-            client.destroy();
-            if (error) reject(error);
-            else resolve(message);
-        };
-
-        client.setTimeout(DNS_QUERY_TIMEOUT, () => finish(new Error(`タイムアウト (${DNS_QUERY_TIMEOUT}ms): ${serverIp}`)));
-        client.connect(port, serverIp, () => client.write(buf));
-        client.on('data', data => {
-            responseBuffer = Buffer.concat([responseBuffer, data]);
-            if (responseBuffer.length >= 2 && responseBuffer.length >= responseBuffer.readUInt16BE(0) + 2) {
-                finish(null, responseBuffer);
-            }
-        });
-        client.on('error', err => finish(err));
-    });
-}
-
-// DNSSEC 応答には DO ビットが必須。dns-self-resolver が問い合わせオプションに対応するまでは専用 transport を使う。
 async function getResourceRecord(domain, serverIp, rType, options = {}) {
-    const queryUdp = options.queryUdp || queryDnssecUdp;
-    const queryTcp = options.queryTcp || queryDnssecTcp;
-    let buf = dnsPacket.encode({
-        type: 'query',
-        id: Math.floor(Math.random() * 65535),
-        questions: [{ type: rType, name: domain }],
-        additionals: [{ type: 'OPT', name: '.', udpPayloadSize: DNS_UDP_PAYLOAD_SIZE, flags: dnsPacket.DNSSEC_OK }]
-    });
-    let msg = await queryUdp(serverIp, buf);
-    let res = dnsPacket.decode(msg);
-
-    if (res.flags & dnsPacket.TRUNCATED_RESPONSE) {
-        buf = dnsPacket.streamEncode({
-            type: 'query',
-            id: Math.floor(Math.random() * 65535),
-            questions: [{ type: rType, name: domain }],
-            additionals: [{ type: 'OPT', name: '.', flags: dnsPacket.DNSSEC_OK }]
-        });
-        msg = await queryTcp(serverIp, buf);
-        res = dnsPacket.streamDecode(msg);
+    const queryUdp = options.queryDirectlyUDP || queryDirectlyUDP;
+    const queryOptions = { useEdns: true, dnssecOk: true };
+    const res = await queryUdp(domain, serverIp, options.dnsResponseCache || dnssecResponseCache, rType, queryOptions);
+    if (res.error) {
+        throw new Error(`${serverIp}へのDNSクエリ失敗: ${res.error}${res.detail ? ` (${res.detail})` : ''}`);
     }
 
     const answers = res.answers || [];

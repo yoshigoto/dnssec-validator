@@ -10,7 +10,7 @@
   "dependencies": {
     "@noble/post-quantum": "^0.7.1",
     "dns-packet": "^5.6.1",
-    "dns-self-resolver": "git+https://github.com/yoshigoto/dns-self-resolver.git",
+    "dns-self-resolver": "git+https://github.com/yoshigoto/dns-self-resolver.git#8aad881ae1e0ebc95141be9970784fe11be8e9dc",
     "express": "^5.2.1"
   }
 }

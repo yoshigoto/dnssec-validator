@@ -345,19 +345,19 @@ test('権威 SOA 応答からゾーン頂点を確定する', async () => {
     assert.equal(result.currentNs, '192.0.2.1');
 });
 
-test('DOビット付き応答からDNSSECリソースレコードを抽出する', async () => {
+test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSECリソースレコードを抽出する', async () => {
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
-        queryUdp: async (serverIp, query) => {
+        queryDirectlyUDP: async (domain, serverIp, cache, qType, queryOptions) => {
+            assert.equal(domain, 'example.test');
             assert.equal(serverIp, '192.0.2.3');
-            const decodedQuery = dnsPacket.decode(query);
-            assert.equal(decodedQuery.questions[0].name, 'example.test');
-            assert.equal(decodedQuery.questions[0].type, 'A');
-            assert.ok((decodedQuery.additionals[0].flags & dnsPacket.DNSSEC_OK) !== 0);
-            return dnsPacket.encode({
-                type: 'response',
+            assert.ok(cache instanceof Map);
+            assert.equal(qType, 'A');
+            assert.deepEqual(queryOptions, { useEdns: true, dnssecOk: true });
+            return {
+                rcode: 'NOERROR',
                 answers: [{ name: 'example.test', type: 'A', data: '192.0.2.10' }],
                 authorities: []
-            });
+            };
         }
     });
 
