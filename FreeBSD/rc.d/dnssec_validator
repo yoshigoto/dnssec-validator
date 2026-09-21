@@ -18,10 +18,12 @@ load_rc_config "$name"
 : ${dnssec_validator_pidfile:="/var/run/${name}.pid"}
 : ${dnssec_validator_log:="/var/log/${name}.log"}
 
+user_name="www"
 pidfile="${dnssec_validator_pidfile}"
+logfile="${dnssec_validator_log}"
 command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} -o ${dnssec_validator_log} ${dnssec_validator_node} ${dnssec_validator_chdir}/${dnssec_validator_script}"
-stop_cmd=${name}_stop
+command_args="-f -p ${pidfile} -u ${user_name} -o ${logfile} ${dnssec_validator_node} ${dnssec_validator_script}"
+stop_cmd="${name}_stop"
 
 dnssec_validator_stop() {
 	test -e ${pidfile} && kill "$(cat ${pidfile})"
