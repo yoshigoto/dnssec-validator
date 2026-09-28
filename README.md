@@ -57,7 +57,15 @@ npm start
 
 <http://localhost:3002/>
 
-このアプリは `3002` 番ポートで待ち受けます。ポート番号を変更する場合は、`dnssec-validator.js` の `PORT` 定数を変更してください。
+このアプリは `127.0.0.1:3002` のみで待ち受けます。ポート番号を変更する場合は、`dnssec-validator.js` の `PORT` 定数を変更し、nginx の upstream も合わせてください。nginx は同一ホストの loopback を指定して転送します。
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:3002;
+}
+```
+
+この設定により、外部から Node.js のポートへ直接接続できなくなります。同一ホスト上の他プロセスからの接続は引き続き可能です。
 
 ### テスト
 

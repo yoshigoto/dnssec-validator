@@ -1344,7 +1344,7 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-    const server = app.listen(PORT, () => {
+    const server = app.listen(PORT, '127.0.0.1', () => {
         console.log(`Webサーバーが起動しました: http://localhost:${PORT}`);
     });
     server.on('error', error => {
