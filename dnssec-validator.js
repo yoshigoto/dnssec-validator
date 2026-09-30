@@ -1340,7 +1340,10 @@ app.post('/api/validate', async (req, res) => {
                     diagnostics: [...proofResult.diagnostics],
                     observedNsec: proofResult.observedNsec,
                     observedNsec3: proofResult.observedNsec3,
-                    records: proofResult.records.map(record => ({ name: record.name, type: record.type }))
+                    records: proofResult.records.map(record => {
+                        const signature = (parentDsInfo.denialRrsigRecords || []).find(candidate => candidate.data.typeCovered === record.type && normalizeDnsName(candidate.name) === normalizeDnsName(record.name));
+                        return { name: record.name, type: record.type, expiration: signature && signature.data.expiration };
+                    })
                 };
                 if (proofResult.records.length > 0 && parentDsIp) {
                     const recordResults = [];
@@ -1402,6 +1405,7 @@ app.post('/api/validate', async (req, res) => {
             keyTag: rrsig.data.keyTag,
             typeCovered: rrsig.data.typeCovered,
             algorithm: rrsig.data.algorithm,
+            expiration: rrsig.data.expiration,
             verified: null
         }));
         if (rrsigRecords.length === 0) {
@@ -1482,6 +1486,7 @@ app.post('/api/validate', async (req, res) => {
             keyTag: rrsig.data.keyTag,
             typeCovered: rrsig.data.typeCovered,
             algorithm: rrsig.data.algorithm,
+            expiration: rrsig.data.expiration,
             verified: null
         }));
         if (dnskeyRrsig.length > 0) {
@@ -1573,7 +1578,7 @@ app.post('/api/validate', async (req, res) => {
                     }
                     const verifiedByZsk = dnskeyRecords.some(key => isZoneSigningKey(key.data.flags) && calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)) === zskKeyTag);
                     const dnskeyRrsetVerifiedByKsk = aRecordValidation.trustChain.dnskeyRrsetSignatures.length > 0;
-                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, verified, reason, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
+                    aRecordValidation.signatures.push({ keyTag: rrsig.data.keyTag, algorithm: rrsig.data.algorithm, expiration: rrsig.data.expiration, verified, reason, zskKeyTag, trustChainVerified: verified && verifiedByZsk && dnskeyRrsetVerifiedByKsk });
                 }
                 if (!aRecordValidation.recordsFound) {
                     const nxDomainProof = aInfo.rcode === 'NXDOMAIN' ? findNxDomainProof(domain, aInfo.denialRecords) : null;
@@ -1590,7 +1595,10 @@ app.post('/api/validate', async (req, res) => {
                     }
                     aRecordValidation.denialProof = denialProof;
                     if (denialRecords.length > 0) {
-                        denialProof.records = denialRecords.map(record => ({ name: record.name, type: record.type }));
+                        denialProof.records = denialRecords.map(record => {
+                            const signature = aInfo.denialRrsigRecords.find(candidate => candidate.data.typeCovered === record.type && normalizeDnsName(candidate.name) === normalizeDnsName(record.name));
+                            return { name: record.name, type: record.type, expiration: signature && signature.data.expiration };
+                        });
                         denialProof.verified = denialRecords.every(record => {
                             const signature = aInfo.denialRrsigRecords.find(candidate => candidate.data.typeCovered === record.type && normalizeDnsName(candidate.name) === normalizeDnsName(record.name));
                             return signature && dnskeyRecords.some(key => verifyDenialRecordRrsig(record, signature, key).verified);

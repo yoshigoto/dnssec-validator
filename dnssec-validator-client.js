@@ -2,6 +2,7 @@ const domainInput = document.getElementById('domain');
 const savedDomainKey = 'dnssec-validator-domain';
 const domainFromUrl = new URLSearchParams(window.location.search).get('domain');
 const MAX_DISPLAY_TEXT_LENGTH = 2000;
+const RRSIG_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60;
 
 function sanitizeDisplayText(value) {
     const text = (value === null || value === undefined ? '' : String(value))
@@ -29,7 +30,26 @@ const dnssecAlgorithmNames = { 1: 'RSAMD5', 5: 'RSASHA1', 7: 'RSASHA1-NSEC3-SHA1
 const algorithmText = algorithm => 'alg ' + algorithm + ' (' + (dnssecAlgorithmNames[algorithm] || 'Unknown') + ')';
 const keyText = (records, role) => !records || records.length === 0 ? [role + ': 取得できませんでした'] : records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm));
 const dsText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest);
-const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証'));
+function rrsigExpirationText(expiration) {
+    if (!Number.isFinite(expiration)) return '';
+    const remainingSeconds = expiration - Math.floor(Date.now() / 1000);
+    const expirationDate = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Tokyo' }).format(new Date(expiration * 1000));
+    let remainingText;
+    if (remainingSeconds <= 0) {
+        remainingText = '期限切れ';
+    } else {
+        const totalMinutes = Math.ceil(remainingSeconds / 60);
+        const days = Math.floor(totalMinutes / 1440);
+        const hours = Math.floor((totalMinutes % 1440) / 60);
+        const minutes = totalMinutes % 60;
+        remainingText = '残り ' + (days ? days + '日 ' : '') + (hours ? hours + '時間 ' : '') + minutes + '分';
+    }
+    const warning = remainingSeconds > 0 && remainingSeconds <= RRSIG_EXPIRY_WARNING_SECONDS
+        ? ' / 期限間近（7日以内）: 更新状況を確認してください'
+        : '';
+    return ' / 期限日時 ' + expirationDate + ' JST / ' + remainingText + warning;
+}
+const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証') + rrsigExpirationText(record.expiration));
 const aRecordValidationText = validation => {
     if (!validation || !validation.queried) return ['検証データを取得できませんでした'];
     if (validation.error) return ['検証できませんでした: ' + validation.error];
@@ -37,7 +57,11 @@ const aRecordValidationText = validation => {
         const proof = validation.denialProof;
         if (proof && proof.type) {
             const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : 'Aレコード不在';
-            return [proof.type + 'による' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), proof.keyTag ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) : '対応するRRSIGが見つかりませんでした'];
+            const signatureLines = (proof.records || []).map(record => record.type + ' ' + record.name + rrsigExpirationText(record.expiration));
+            const fallbackLine = proof.keyTag
+                ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) + rrsigExpirationText(proof.expiration)
+                : '対応するRRSIGが見つかりませんでした';
+            return [proof.type + 'による' + proofKind + '証明: ' + (proof.verified ? '成功 ✓' : '失敗 ✕'), ...(signatureLines.length ? signatureLines : [fallbackLine])];
         }
         const diagnostics = proof && proof.diagnostics ? proof.diagnostics : [];
         const observedNsec = proof && proof.observedNsec ? proof.observedNsec : [];
@@ -61,7 +85,8 @@ const aRecordValidationText = validation => {
                 ? '信頼の連鎖: 成功 ✓'
                 : '信頼の連鎖: 失敗 ✕';
         const line = 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
-        return signature.verified === false && signature.reason ? [line, '失敗理由: ' + signature.reason] : [line];
+        const lineWithExpiration = line + rrsigExpirationText(signature.expiration);
+        return signature.verified === false && signature.reason ? [lineWithExpiration, '失敗理由: ' + signature.reason] : [lineWithExpiration];
     }).flat());
 };
 
@@ -76,17 +101,17 @@ function setNodeContent(nodeId, title, titleColor, lines) {
     metaElement.className = 'node-meta';
     sanitizeDisplayLines(lines).forEach((line, index) => {
         if (index > 0) metaElement.appendChild(document.createElement('br'));
-        const failedLabel = '失敗 ✕';
-        const failedLabelIndex = line.indexOf(failedLabel);
-        if (failedLabelIndex === -1) {
-            metaElement.appendChild(document.createTextNode(line));
-            return;
+        const parts = line.split(/(失敗 ✕|期限間近（7日以内）)/g);
+        for (const part of parts) {
+            if (part === '失敗 ✕' || part === '期限間近（7日以内）') {
+                const marker = document.createElement('span');
+                marker.className = part === '失敗 ✕' ? 'signature-failed' : 'signature-expiring';
+                marker.textContent = part;
+                metaElement.appendChild(marker);
+            } else {
+                metaElement.appendChild(document.createTextNode(part));
+            }
         }
-        metaElement.appendChild(document.createTextNode(line.slice(0, failedLabelIndex)));
-        const failedElement = document.createElement('span');
-        failedElement.className = 'signature-failed';
-        failedElement.textContent = failedLabel;
-        metaElement.append(failedElement, document.createTextNode(line.slice(failedLabelIndex + failedLabel.length)));
     });
     node.append(titleElement, metaElement);
 }
@@ -185,7 +210,7 @@ function renderDiagram(diagram) {
     const parentDsLines = diagram.parent.ds && diagram.parent.ds.length > 0
         ? dsText(diagram.parent.ds)
         : dsAbsenceProof
-            ? [dsAbsenceProof.verified ? 'DSなし（親側不在証明: 検証成功）' : 'DSなし（親側不在証明: 未確認）', ...(dsAbsenceProof.type ? [dsAbsenceProof.type + ' / ' + (dsAbsenceProof.records || []).map(record => record.name).join(', ')] : []), ...(dsAbsenceProof.diagnostics || [])]
+            ? [dsAbsenceProof.verified ? 'DSなし（親側不在証明: 検証成功）' : 'DSなし（親側不在証明: 未確認）', ...(dsAbsenceProof.type ? (dsAbsenceProof.records || []).map(record => record.type + ' ' + record.name + rrsigExpirationText(record.expiration)) : []), ...(dsAbsenceProof.diagnostics || [])]
             : dsText(diagram.parent.ds);
     setNodeContent('parentDs', 'DS', 'blue', [...parentDsLines, '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)']);
