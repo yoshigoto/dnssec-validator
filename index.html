@@ -57,6 +57,9 @@
         .status-consistent { color: var(--good); }
         .status-difference { color: var(--bad); }
         .status-incomplete { color: #9a3412; }
+        .ds-proposal { display: none; margin-top: 24px; font: 12px/1.6 sans-serif; overflow-wrap: anywhere; }
+        .ds-proposal h2 { font-size: 17px; margin: 0 0 8px; }
+        .ds-proposal p { margin: 4px 0; }
         .arrow { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; min-height: 80px; }
         .arrow::before { content: ''; position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--line); z-index: 0; }
         .arrow::after { content: ''; position: absolute; left: 50%; bottom: -1px; width: 9px; height: 9px; border-right: 2px solid var(--line); border-bottom: 2px solid var(--line); transform: translateX(-50%) rotate(45deg); z-index: 0; }
@@ -123,6 +126,11 @@
                 <div id="chainArrow" class="arrow chain-arrow"></div>
             </div>
             <div class="legend">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
+            <section id="dsProposal" class="ds-proposal" aria-live="polite">
+                <h2>CDS/CDNSKEY と親 DS の比較</h2>
+                <div id="dsProposalContent"></div>
+                <p>探索に使用した親子の権威サーバーの応答による診断です。親側での自動変更や提案レコードの署名・信頼の検証は行いません。鍵ロールオーバー時は旧鍵の撤去前に、新鍵のDSが親へ反映され、署名とキャッシュ有効期間を確認してください。削除シグナルは慎重に確認してください。</p>
+            </section>
             <section id="authorityChecks" class="authority-checks" aria-live="polite">
                 <h2>権威サーバー間の応答比較</h2>
                 <p>親の委任NS・DSと子の権威NS・DNSKEYを比較します。RRSIGはこの表の比較対象外です。</p>

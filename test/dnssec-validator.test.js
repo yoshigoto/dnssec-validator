@@ -15,6 +15,7 @@ import {
     getARecord,
     getResourceRecord,
     compareAuthorityRecordSets,
+    diagnoseDsProposals,
     verifyDnskeyWithDs,
     isZoneSigningKey,
     calculateKeyTag,
@@ -440,6 +441,72 @@ test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSEC
     });
 
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
+});
+
+test('CDS/CDNSKEYの提案と親DSの差分を検出する', async () => {
+    const domain = 'example.test';
+    const key = makeDnskeyData();
+    const ds = makeDsForDnskey(domain, key);
+    const cds = Buffer.concat([Buffer.from([ds.keyTag >> 8, ds.keyTag & 255, ds.algorithm, ds.digestType]), ds.digest]);
+    const cdnskey = buildDnskeyFullRdata(key);
+    const queryDirectlyUDP = async (name, ip, cache, type) => ({
+        rcode: 'NOERROR',
+        answers: [{ name, type, data: type === 'CDS' ? cds : cdnskey }]
+    });
+    const parentDsInfo = { rcode: 'NOERROR', resourceRecords: [{ name: domain, type: 'DS', data: ds }] };
+    const matching = await diagnoseDsProposals(domain, parentDsInfo, '192.0.2.1', { queryDirectlyUDP });
+    assert.equal(matching.cds.status, 'match');
+    assert.equal(matching.cdnskey.status, 'match');
+    parentDsInfo.resourceRecords[0].data = { ...ds, digest: Buffer.alloc(32, 9) };
+    const changed = await diagnoseDsProposals(domain, parentDsInfo, '192.0.2.1', { queryDirectlyUDP });
+    assert.equal(changed.cds.status, 'different');
+    assert.equal(changed.cdnskey.status, 'different');
+    assert.equal(changed.cds.toAdd.length, 1);
+    assert.equal(changed.cds.toRemove.length, 1);
+});
+
+test('提案なし・削除シグナル・問い合わせ失敗を区別する', async () => {
+    const domain = 'example.test';
+    const ds = makeDsForDnskey(domain, makeDnskeyData());
+    const parent = { rcode: 'NOERROR', resourceRecords: [{ name: domain, data: ds }] };
+    const absent = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
+        queryDirectlyUDP: async () => ({ rcode: 'NOERROR', answers: [] })
+    });
+    assert.equal(absent.cds.status, 'absent');
+    assert.equal(absent.cdnskey.status, 'absent');
+    assert.equal(absent.cds.toRemove.length, 1);
+    const deletion = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
+        queryDirectlyUDP: async (name, ip, cache, type) => ({ rcode: 'NOERROR', answers: [{ name, type, data: type === 'CDS' ? Buffer.alloc(5) : Buffer.from([0, 0, 3, 0, 0]) }] })
+    });
+    assert.equal(deletion.cds.status, 'delete');
+    assert.equal(deletion.cdnskey.status, 'delete');
+    const failed = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
+        queryDirectlyUDP: async (name, ip, cache, type) => type === 'CDS' ? { error: 'TIMEOUT' } : { rcode: 'SERVFAIL' }
+    });
+    assert.equal(failed.cds.status, 'error');
+    assert.equal(failed.cdnskey.status, 'error');
+    const unknownParent = await diagnoseDsProposals(domain, null, '192.0.2.1', {
+        queryDirectlyUDP: async () => { throw new Error('問い合わせてはいけません'); }
+    });
+    assert.equal(unknownParent.cds, null);
+});
+
+test('CDSとCDNSKEYの順序が異なっても提案の不一致としない', async () => {
+    const domain = 'example.test';
+    const keys = [makeDnskeyData(), { ...makeDnskeyData(), key: Buffer.from('next-public-key') }];
+    const dsRecords = keys.map(key => makeDsForDnskey(domain, key));
+    const parent = { rcode: 'NOERROR', resourceRecords: dsRecords.map(data => ({ name: domain, data })) };
+    const result = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
+        queryDirectlyUDP: async (name, ip, cache, type) => ({
+            rcode: 'NOERROR',
+            answers: type === 'CDS'
+                ? dsRecords.map(data => ({ name, type, data: Buffer.concat([Buffer.from([data.keyTag >> 8, data.keyTag & 255, data.algorithm, data.digestType]), data.digest]) })).reverse()
+                : keys.map(data => ({ name, type, data: buildDnskeyFullRdata(data) }))
+        })
+    });
+    assert.equal(result.cds.status, 'match');
+    assert.equal(result.cdnskey.status, 'match');
+    assert.deepEqual(result.notes, []);
 });
 
 test('権威サーバー間のNS RRsetを順序に依存せず比較する', async () => {
