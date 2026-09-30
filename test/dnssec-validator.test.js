@@ -27,6 +27,7 @@ import {
     isValidationSuccessful,
     classifyValidationResult,
     findARecordNodataProof,
+    analyzeRecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
     toBase32Hex,
@@ -283,6 +284,14 @@ test('NSEC3のtype bitmapがAを示すNODATA証明の不成立理由を返す', 
 
     assert.equal(result.record, null);
     assert.match(result.diagnostics.join('\n'), /NSEC3のtype bitmapにAが含まれるため/);
+});
+
+test('NSECのtype bitmapで選択したレコード種別のNODATA証明を判定する', () => {
+    const domain = 'www.example.test';
+    const denialRecord = { name: domain, type: 'NSEC', data: { rrtypes: ['A', 'SOA'] } };
+
+    assert.equal(analyzeRecordNodataProof(domain, 'AAAA', [denialRecord]).record, denialRecord);
+    assert.match(analyzeRecordNodataProof(domain, 'A', [denialRecord]).diagnostics.join('\n'), /Aが含まれる/);
 });
 
 test('NSEC による NXDOMAIN 証明を構成する', () => {
@@ -693,6 +702,22 @@ test('POST /api/validate は不正なドメインを DNS 問い合わせ前に�
         });
         assert.equal(response.statusCode, 400);
         assert.match(JSON.parse(response.body).error, /無効な文字|形式が無効/);
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('POST /api/validate は未対応のレコード種別をDNS問い合わせ前に拒否する', async () => {
+    const server = app.listen(0);
+    try {
+        const response = await request(server, {
+            method: 'POST',
+            path: '/api/validate',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain: 'example.test', recordType: 'INVALID' })
+        });
+        assert.equal(response.statusCode, 400);
+        assert.match(JSON.parse(response.body).error, /対応していないレコード種別/);
     } finally {
         await new Promise(resolve => server.close(resolve));
     }

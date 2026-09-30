@@ -13,26 +13,27 @@
 - 子ゾーンから DNSKEY と DNSKEY に対する RRSIG を取得
 - DS と KSK のダイジェストを照合
 - 子ゾーンの CDS / CDNSKEY から提案された DS と親側に登録された DS の差分を診断（自動変更や提案の署名検証は行いません）
-- DS、DNSKEY、A レコードに対する RRSIG を検証
+- DS、DNSKEY、選択した対象レコードに対する RRSIG を検証
 - RRSIG の有効期限を日本時間の日時と残り時間で表示し、期限まで7日以内の場合は更新確認を促す
 - 親・子それぞれの全権威サーバーから NS / DS / DNSKEY を取得し、RRset の差分や応答失敗を比較
-- 対象ドメインがゾーン頂点でない場合、A レコードの DNSSEC 検証も実行
-- A レコードが存在しない場合、NSEC / NSEC3 による不在証明を確認
+- 対象ドメインがゾーン頂点でない場合、A / AAAA / CNAME / MX / NS / TXT / CAA / SRV から選択したレコードの DNSSEC 検証も実行
+- 選択したレコードが存在しない場合、NSEC / NSEC3 による不在証明を確認
 - 検証結果を親ゾーンと子ゾーンの関係図として表示
 
 ## 使い方
 
 1. 公開 URL を開きます。
 2. 検証したいドメイン名を入力します（例: `example.com`）。URL を入力した場合はホスト名を取り出して検証します。
-3. **検証スタート**を押します。
-4. 成功または失敗の結果と、DS、DNSKEY、RRSIG の検証状況を確認します。
+3. 検証するレコード種別を選択します。
+4. **検証スタート**を押します。
+5. 成功または失敗の結果と、DS、DNSKEY、RRSIG の検証状況を確認します。
 
-入力したドメイン名はブラウザーの `localStorage` に保存され、次回表示時に再利用されます。URL の `domain` クエリーパラメーターから初期値を指定することもできます。
+入力したドメイン名はブラウザーの `localStorage` に保存され、次回表示時に再利用されます。URL の `domain` クエリーパラメーターでドメイン名、`recordType` クエリーパラメーターで検証するレコード種別の初期値を指定することもできます。`recordType` には `A`、`AAAA`、`CNAME`、`MX`、`NS`、`TXT`、`CAA`、`SRV` を指定できます。
 
 例:
 
 ```text
-https://www.on-link.jp/dnssecvalidator/?domain=example.com
+https://www.on-link.jp/dnssecvalidator/?domain=example.com&recordType=AAAA
 ```
 
 ## ローカルでの起動

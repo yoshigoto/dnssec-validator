@@ -15,6 +15,8 @@
         label { display: block; margin-bottom: 8px; font-weight: bold; }
         .input-row { display: flex; align-items: center; gap: 10px; }
         input[type="text"] { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; font: 15px sans-serif; }
+        .input-row label { margin: 0; white-space: nowrap; font: bold 13px sans-serif; }
+        select { padding: 12px 30px 12px 10px; border: 1px solid var(--line); border-radius: 7px; background: white; font: 15px sans-serif; }
         input[type="text"]:focus { border-color: var(--blue); outline: 3px solid #bfdbfe; }
         button { background: var(--ink); color: white; border: none; padding: 12px 24px; border-radius: 7px; cursor: pointer; font: bold 15px sans-serif; white-space: nowrap; }
         button:hover { background: var(--blue); }
@@ -96,6 +98,17 @@
                 <label for="domain">検証するドメイン名</label>
                 <div class="input-row">
                     <input type="text" id="domain" placeholder="example.com" autofocus>
+                    <label for="recordType">レコード種別</label>
+                    <select id="recordType">
+                        <option value="A">A</option>
+                        <option value="AAAA">AAAA</option>
+                        <option value="CNAME">CNAME</option>
+                        <option value="MX">MX</option>
+                        <option value="NS">NS</option>
+                        <option value="TXT">TXT</option>
+                        <option value="CAA">CAA</option>
+                        <option value="SRV">SRV</option>
+                    </select>
                     <button type="submit">検証スタート</button>
                 </div>
             </div>

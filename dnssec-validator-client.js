@@ -1,8 +1,15 @@
 const domainInput = document.getElementById('domain');
+const recordTypeInput = document.getElementById('recordType');
 const savedDomainKey = 'dnssec-validator-domain';
-const domainFromUrl = new URLSearchParams(window.location.search).get('domain');
+const urlParameters = new URLSearchParams(window.location.search);
+const domainFromUrl = urlParameters.get('domain');
+const recordTypeFromUrl = (urlParameters.get('recordType') || '').toUpperCase();
 const MAX_DISPLAY_TEXT_LENGTH = 2000;
 const RRSIG_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60;
+
+if ([...recordTypeInput.options].some(option => option.value === recordTypeFromUrl)) {
+    recordTypeInput.value = recordTypeFromUrl;
+}
 
 function sanitizeDisplayText(value) {
     const text = (value === null || value === undefined ? '' : String(value))
@@ -52,11 +59,12 @@ function rrsigExpirationText(expiration) {
 const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証') + rrsigExpirationText(record.expiration));
 const aRecordValidationText = validation => {
     if (!validation || !validation.queried) return ['検証データを取得できませんでした'];
+    const recordType = validation.recordType || 'A';
     if (validation.error) return ['検証できませんでした: ' + validation.error];
     if (!validation.recordsFound) {
         const proof = validation.denialProof;
         if (proof && proof.type) {
-            const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : 'Aレコード不在';
+            const proofKind = proof.rcode === 'NXDOMAIN' ? '名前不在' : `${recordType}レコード不在`;
             const signatureLines = (proof.records || []).map(record => record.type + ' ' + record.name + rrsigExpirationText(record.expiration));
             const fallbackLine = proof.keyTag
                 ? 'RRSIG ' + proof.type + ' / Key Tag ' + proof.keyTag + ' / ' + algorithmText(proof.algorithm) + rrsigExpirationText(proof.expiration)
@@ -68,9 +76,9 @@ const aRecordValidationText = validation => {
         const observedNsec3 = proof && proof.observedNsec3 ? proof.observedNsec3 : [];
         const nsecLines = observedNsec.map(record => '応答NSEC: ' + record.name + ' -> ' + record.nextDomain);
         const nsec3Lines = observedNsec3.map(record => '応答NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
-        return ['Aレコードの探索: 失敗 ✕', 'NSEC/NSEC3による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
+        return [`${recordType}レコードの探索: 失敗 ✕`, 'NSEC/NSEC3による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
     }
-    if (validation.signatures.length === 0) return ['AレコードへのRRSIGの探索: 失敗 ✕'];
+    if (validation.signatures.length === 0) return [`${recordType}レコードへのRRSIGの探索: 失敗 ✕`];
     const trustChain = validation.trustChain || {};
     const kskKeyTags = trustChain.dsMatchedKskKeyTags || [];
     const dnskeySignatures = trustChain.dnskeyRrsetSignatures || [];
@@ -84,7 +92,7 @@ const aRecordValidationText = validation => {
             : signature.trustChainVerified
                 ? '信頼の連鎖: 成功 ✓'
                 : '信頼の連鎖: 失敗 ✕';
-        const line = 'ZSK -> A RRset: RRSIG A / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
+        const line = 'ZSK -> ' + recordType + ' RRset: RRSIG ' + recordType + ' / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
         const lineWithExpiration = line + rrsigExpirationText(signature.expiration);
         return signature.verified === false && signature.reason ? [lineWithExpiration, '失敗理由: ' + signature.reason] : [lineWithExpiration];
     }).flat());
@@ -215,7 +223,8 @@ function renderDiagram(diagram) {
     setNodeContent('parentDs', 'DS', 'blue', [...parentDsLines, '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)']);
     setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
-    setNodeContent('childARecordValidation', '参考：ドメイン名に対するAレコードDNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
+    const recordType = diagram.child.aRecordValidation && diagram.child.aRecordValidation.recordType || 'A';
+    setNodeContent('childARecordValidation', 'ドメイン名に対する' + recordType + 'レコードDNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
     const chainArrow = document.getElementById('chainArrow');
     chainArrow.className = 'arrow chain-arrow ' + (diagram.checks.dsKeyMatch ? 'good' : 'bad');
     chainArrow.replaceChildren();
@@ -240,7 +249,7 @@ async function validate(event) {
     errorDetailsElement.textContent = '';
     renderDiagram(emptyDiagram(domain));
     try {
-        const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) });
+        const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, recordType: recordTypeInput.value }) });
         const contentType = response.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
             const bodyText = await response.text();
