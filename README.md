@@ -99,11 +99,14 @@ Content-Type: application/json
 }
 ```
 
-成功時のレスポンスには、次の情報が含まれます。
+Secure と判定された場合のレスポンス例です。すべての検証結果に、状態を示す `status`、表示用の `statusLabel`、次の確認箇所を示す `nextChecks` が含まれます。
 
 ```json
 {
   "success": true,
+  "status": "secure",
+  "statusLabel": "Secure（検証成功）",
+  "nextChecks": ["追加確認は不要です。"],
   "logs": [],
   "diagram": {
     "parent": {},
@@ -123,9 +126,16 @@ Content-Type: application/json
 }
 ```
 
-`success` は親ゾーンの DS と子ゾーンの DNSKEY が一致した場合に `true` になります。詳細な検証結果やエラーは `logs` と `diagram` に格納されます。
+`status` は次のいずれかです。
+
+- `secure`: DSから対象レコードまでの信頼の連鎖と署名または不在証明を検証できた状態です。`success` は `true` になります。
+- `insecure`: 親側のNSEC/NSEC3不在証明を検証し、DSのない未署名委任と確認できた状態です。DNSSECの検証成功ではないため、`success` は `false` です。
+- `bogus`: DSは存在しますが、DSと子の鍵の不一致や署名・不在証明の検証失敗が確認された状態です。
+- `indeterminate`: タイムアウトや必要な応答・不在証明の不足などにより判定できない状態です。
+
+`success` は親DSと子DNSKEYの一致だけではなく、信頼の連鎖および対象レコードの署名、または不在証明まで検証できた場合に `true` になります。次に確認する内容は `nextChecks`、詳細な検証結果やエラーは `logs` と `diagram` に格納されます。入力不備やレート制限のHTTP 400/429応答は、検証結果の分類対象外です。
 `diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
-`diagram.dsProposal` には、親のDSと子のCDS / CDNSKEYが提案するDSの比較結果が含まれます。`status` は `match`、`different`、`delete`、`absent`、`error` のいずれかです。
+`diagram.dsProposal` には、親のDSと子のCDS / CDNSKEYが提案するDSの比較結果が含まれます。`diagram.dsProposal.cds.status` と `diagram.dsProposal.cdnskey.status` は `match`、`different`、`delete`、`absent`、`error` のいずれかです。
 
 入力不備の場合は `400`、レート制限超過時は `429`、サーバー内部エラー時は `500` を返します。
 
