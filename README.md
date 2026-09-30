@@ -14,6 +14,7 @@
 - DS と KSK のダイジェストを照合
 - 子ゾーンの CDS / CDNSKEY から提案された DS と親側に登録された DS の差分を診断（自動変更や提案の署名検証は行いません）
 - DS、DNSKEY、A レコードに対する RRSIG を検証
+- 親・子それぞれの全権威サーバーから NS / DS / DNSKEY を取得し、RRset の差分や応答失敗を比較
 - 対象ドメインがゾーン頂点でない場合、A レコードの DNSSEC 検証も実行
 - A レコードが存在しない場合、NSEC / NSEC3 による不在証明を確認
 - 検証結果を親ゾーンと子ゾーンの関係図として表示
@@ -51,7 +52,14 @@ nvm use
 npm install
 npm start
 ```
-- 親・子それぞれの全権威サーバーから NS / DS / DNSKEY を取得し、RRset の差分や応答失敗を比較
+
+`nvm` が未導入の場合は、Ubuntu 側でインストールしてからシェルを再起動してください。Node.js 18 以上で動作します。
+
+起動後、次の URL を開きます。
+
+<http://localhost:3002/>
+
+このアプリは `127.0.0.1:3002` のみで待ち受けます。ポート番号を変更する場合は、`dnssec-validator.js` の `PORT` 定数を変更し、nginx の upstream も合わせてください。nginx は同一ホストの loopback を指定して転送します。
 
 ```nginx
 location / {
@@ -63,24 +71,19 @@ location / {
 
 ### テスト
 
-外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
-    "checks": {},
-    "authorityChecks": {
-      "parent": { "nameservers": {}, "ds": {} },
-      "child": { "nameservers": {}, "dnskey": {} }
-    }
+外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、権威サーバー間 RRset 比較、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
+
 ```bash
 npm test
 ```
 
 VS Code では WSL 拡張機能でこのフォルダーを開くと、統合ターミナル、起動設定、テスト設定が Ubuntu 側で実行されます。
-`diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
-`diagram.dsProposal` には、親側DSと子側CDS・CDNSKEYから算出したDSの比較結果が含まれます。差分は変更の提案を示すもので、親への反映や信頼性の保証ではありません。
 
 テスト本体は `test/dnssec-validator.test.js` にあります。実際の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
 
 ## API
 
+画面からの検証処理は、次のエンドポイントを使用します。
 
 ### `POST /api/validate`
 
@@ -105,12 +108,17 @@ Content-Type: application/json
   "diagram": {
     "parent": {},
     "child": {},
-    "checks": {}
+    "checks": {},
+    "authorityChecks": {
+      "parent": { "nameservers": {}, "ds": {} },
+      "child": { "nameservers": {}, "dnskey": {} }
+    }
   }
 }
 ```
 
 `success` は親ゾーンの DS と子ゾーンの DNSKEY が一致した場合に `true` になります。詳細な検証結果やエラーは `logs` と `diagram` に格納されます。
+`diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
 
 入力不備の場合は `400`、レート制限超過時は `429`、サーバー内部エラー時は `500` を返します。
 
