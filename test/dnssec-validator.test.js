@@ -24,11 +24,13 @@ import {
     verifyMLDSASignature,
     createARecordValidation,
     isValidationSuccessful,
+    classifyValidationResult,
     findARecordNodataProof,
     findNxDomainProof,
     nsec3Hash,
     toBase32Hex,
     analyzeARecordNodataProof,
+    analyzeDsAbsenceProof,
     createTimeoutGuardedResponder
 } from '../dnssec-validator.js';
 
@@ -189,6 +191,64 @@ test('Aレコードがない場合は有効な不在証明を検証成功の必�
     assert.equal(isValidationSuccessful(diagram), false);
     diagram.child.aRecordValidation.error = 'timeout';
     assert.equal(isValidationSuccessful(diagram), false);
+});
+
+test('親側NSECでNSあり・DSなしの委任点を検出する', () => {
+    const proof = analyzeDsAbsenceProof('delegated.example.test', [{
+        name: 'delegated.example.test',
+        type: 'NSEC',
+        data: { nextDomain: 'next.example.test', rrtypes: ['NS', 'NSEC', 'RRSIG'] }
+    }]);
+
+    assert.equal(proof.type, 'NSEC');
+    assert.equal(proof.records.length, 1);
+    assert.deepEqual(proof.diagnostics, []);
+});
+
+test('親側NSEC3の完全一致とOpt-OutでDS不在候補を検出する', () => {
+    const domain = 'delegated.example.test';
+    const salt = Buffer.from('a1b2', 'hex');
+    const iterations = 2;
+    const ownerHash = toBase32Hex(nsec3Hash(domain, salt, iterations));
+    const exactProof = {
+        name: `${ownerHash}.example.test`,
+        type: 'NSEC3',
+        data: { algorithm: 1, flags: 0, salt, iterations, nextDomain: Buffer.alloc(20), rrtypes: ['NS', 'SOA'] }
+    };
+    assert.equal(analyzeDsAbsenceProof(domain, [exactProof]).type, 'NSEC3');
+
+    const optOutProof = {
+        ...exactProof,
+        name: `${'0'.repeat(32)}.example.test`,
+        data: { ...exactProof.data, flags: 1, nextDomain: Buffer.alloc(20, 0xff), rrtypes: ['NS', 'SOA'] }
+    };
+    const optOutResult = analyzeDsAbsenceProof(domain, [optOutProof]);
+    assert.equal(optOutResult.type, 'NSEC3');
+    assert.match(optOutResult.diagnostics[0], /Opt-Out/);
+});
+
+test('DS応答だけでは未署名委任と判定せず、DSありの証明不成立も拒否する', () => {
+    const noProof = analyzeDsAbsenceProof('delegated.example.test', []);
+    const dsPresent = analyzeDsAbsenceProof('delegated.example.test', [{
+        name: 'delegated.example.test',
+        type: 'NSEC',
+        data: { nextDomain: 'next.example.test', rrtypes: ['NS', 'DS', 'RRSIG'] }
+    }]);
+
+    assert.equal(noProof.records.length, 0);
+    assert.equal(dsPresent.records.length, 0);
+});
+
+test('検証結果をSecure、Insecure、Bogus、判定不能に分類する', () => {
+    const secureDiagram = {
+        parent: { ds: [{ keyTag: 1 }] },
+        checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
+        child: { aRecordValidation: { queried: true, recordsFound: true, signatures: [{ trustChainVerified: true }] } }
+    };
+    assert.equal(classifyValidationResult(secureDiagram).status, 'secure');
+    assert.equal(classifyValidationResult({ parent: { ds: [], dsAbsenceProof: { verified: true } } }).status, 'insecure');
+    assert.equal(classifyValidationResult({ parent: { ds: [{ keyTag: 1 }] }, checks: { dsKeyMatch: false }, child: { dnskey: [{ keyTag: 2 }] } }).status, 'bogus');
+    assert.equal(classifyValidationResult(secureDiagram, true).status, 'indeterminate');
 });
 
 test('NSEC3によるAレコード不存在証明を検出する', () => {
