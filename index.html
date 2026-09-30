@@ -129,7 +129,7 @@
             <section id="dsProposal" class="ds-proposal" aria-live="polite">
                 <h2>CDS/CDNSKEY と親 DS の比較</h2>
                 <div id="dsProposalContent"></div>
-                <p>探索に使用した親子の権威サーバーの応答による診断です。親側での自動変更や提案レコードの署名・信頼の検証は行いません。鍵ロールオーバー時は旧鍵の撤去前に、新鍵のDSが親へ反映され、署名とキャッシュ有効期間を確認してください。削除シグナルは慎重に確認してください。</p>
+                <p>ゾーン頂点の探索で見つけた親側・子側それぞれ1台の権威サーバーから取得したレコードによる診断です。親側での自動変更や提案レコードの署名・信頼の検証は行いません。鍵ロールオーバーでは、新鍵に対応するDSが親に登録されていること、新鍵によるDNSKEYの署名を検証できること、DSとDNSKEYの更新前の情報がキャッシュから消えるまで旧鍵を保持することを確認してください。<a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a>の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親のDS RRset全体を削除する要求です。実行されるとDNSSECの信頼の連鎖が途切れるため、意図した変更か確認してください。</p>
             </section>
             <section id="authorityChecks" class="authority-checks" aria-live="polite">
                 <h2>権威サーバー間の応答比較</h2>

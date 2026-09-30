@@ -110,7 +110,7 @@ function renderDsProposal(diagnosis) {
     addLine('親に登録されたDS: ' + (diagnosis.parentDs.length ? diagnosis.parentDs.map(formatDs).join('、') : diagnosis.cds ? 'なし' : '未確認'));
     for (const [label, comparison] of [['CDS', diagnosis.cds], ['CDNSKEYから算出したDS', diagnosis.cdnskey]]) {
         if (!comparison) continue;
-        const status = { match: '親DSと一致', different: '親DSと差分あり', absent: '提案なし', delete: 'DS削除シグナル', error: '取得・解析失敗' };
+        const status = { match: '親DSと一致', different: '親DSと差分あり', absent: '提案なし', delete: '親のDS RRset全体の削除要求', error: '取得・解析失敗' };
         addLine(label + ': ' + status[comparison.status] + (comparison.error ? ' (' + comparison.error + ')' : ''));
         if (comparison.status === 'different') {
             for (const record of comparison.toAdd) addLine('  子の提案のみ: ' + formatDs(record));

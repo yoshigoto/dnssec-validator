@@ -480,6 +480,19 @@ test('提案なし・削除シグナル・問い合わせ失敗を区別する',
     });
     assert.equal(deletion.cds.status, 'delete');
     assert.equal(deletion.cdnskey.status, 'delete');
+    const mixed = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
+        queryDirectlyUDP: async (name, ip, cache, type) => ({
+            rcode: 'NOERROR',
+            answers: [
+                { name, type, data: type === 'CDS' ? Buffer.alloc(5) : Buffer.from([0, 0, 3, 0, 0]) },
+                { name, type, data: type === 'CDS'
+                    ? Buffer.concat([Buffer.from([ds.keyTag >> 8, ds.keyTag & 255, ds.algorithm, ds.digestType]), ds.digest])
+                    : buildDnskeyFullRdata(makeDnskeyData()) }
+            ]
+        })
+    });
+    assert.notEqual(mixed.cds.status, 'delete');
+    assert.notEqual(mixed.cdnskey.status, 'delete');
     const failed = await diagnoseDsProposals(domain, parent, '192.0.2.1', {
         queryDirectlyUDP: async (name, ip, cache, type) => type === 'CDS' ? { error: 'TIMEOUT' } : { rcode: 'SERVFAIL' }
     });
