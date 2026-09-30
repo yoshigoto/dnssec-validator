@@ -92,7 +92,32 @@ function setNodeContent(nodeId, title, titleColor, lines) {
 }
 
 function emptyDiagram(domain) {
-    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null };
+    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null, dsProposal: null };
+}
+
+function renderDsProposal(diagnosis) {
+    const section = document.getElementById('dsProposal');
+    const content = document.getElementById('dsProposalContent');
+    content.replaceChildren();
+    section.style.display = diagnosis ? 'block' : 'none';
+    if (!diagnosis) return;
+    const formatDs = record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest type ' + record.digestType + ' / ' + record.digest;
+    const addLine = text => {
+        const line = document.createElement('p');
+        line.textContent = sanitizeDisplayText(text);
+        content.appendChild(line);
+    };
+    addLine('親に登録されたDS: ' + (diagnosis.parentDs.length ? diagnosis.parentDs.map(formatDs).join('、') : diagnosis.cds ? 'なし' : '未確認'));
+    for (const [label, comparison] of [['CDS', diagnosis.cds], ['CDNSKEYから算出したDS', diagnosis.cdnskey]]) {
+        if (!comparison) continue;
+        const status = { match: '親DSと一致', different: '親DSと差分あり', absent: '提案なし', delete: 'DS削除シグナル', error: '取得・解析失敗' };
+        addLine(label + ': ' + status[comparison.status] + (comparison.error ? ' (' + comparison.error + ')' : ''));
+        if (comparison.status === 'different') {
+            for (const record of comparison.toAdd) addLine('  子の提案のみ: ' + formatDs(record));
+            for (const record of comparison.toRemove) addLine('  親の登録のみ: ' + formatDs(record));
+        }
+    }
+    for (const note of diagnosis.notes || []) addLine(note);
 }
 
 function renderAuthorityComparisons(authorityChecks) {
@@ -148,6 +173,7 @@ function renderAuthorityComparisons(authorityChecks) {
 
 function renderDiagram(diagram) {
     renderAuthorityComparisons(diagram.authorityChecks);
+    renderDsProposal(diagram.dsProposal);
     const parentKey = diagram.parent.dnskey.filter(key => key.flags === 256);
     const childKsk = diagram.child.dnskey.filter(key => key.flags === 257);
     document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
@@ -155,7 +181,13 @@ function renderDiagram(diagram) {
     document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
     setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵(ZSKの秘密鍵はゾーンのRRsetへの署名に使われる)']);
     setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
-    setNodeContent('parentDs', 'DS', 'blue', [...dsText(diagram.parent.ds), '※子KSKのハッシュ値']);
+    const dsAbsenceProof = diagram.parent.dsAbsenceProof;
+    const parentDsLines = diagram.parent.ds && diagram.parent.ds.length > 0
+        ? dsText(diagram.parent.ds)
+        : dsAbsenceProof
+            ? [dsAbsenceProof.verified ? 'DSなし（親側不在証明: 検証成功）' : 'DSなし（親側不在証明: 未確認）', ...(dsAbsenceProof.type ? [dsAbsenceProof.type + ' / ' + (dsAbsenceProof.records || []).map(record => record.name).join(', ')] : []), ...(dsAbsenceProof.diagnostics || [])]
+            : dsText(diagram.parent.ds);
+    setNodeContent('parentDs', 'DS', 'blue', [...parentDsLines, '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)']);
     setNodeContent('childRrsig', 'RRSIG', '', [...rrsigText(diagram.child.rrsig), '※DNSKEY (KSK/ZSK) を対象とする電子署名']);
     setNodeContent('childARecordValidation', '参考：ドメイン名に対するAレコードDNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
@@ -191,21 +223,23 @@ async function validate(event) {
         }
         const data = await response.json();
         if (data.error) {
-            statusBox.className = 'result-status-box status-failed';
-            statusBox.innerText = 'エラーが発生しました';
-            errorDetailsElement.textContent = sanitizeDisplayText([data.error, ...(data.logs || [])].join('\n'));
+            statusBox.className = 'result-status-box status-indeterminate';
+            statusBox.innerText = data.statusLabel || '判定不能（エラー）';
+            errorDetailsElement.textContent = sanitizeDisplayText([data.error, ...(data.logs || []), ...(data.nextChecks || [])].join('\n'));
             errorDetailsElement.style.display = 'block';
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
-            statusBox.className = 'result-status-box ' + (data.success ? 'status-success' : 'status-failed');
-            statusBox.innerText = data.success ? '検証成功: DNSSECの検証結果に問題はありません！' : '検証失敗: DNSSECの署名または不在証明を検証できませんでした';
-            if (data.logs && data.logs.length > 0) { errorDetailsElement.textContent = sanitizeDisplayText(data.logs.join('\n')); errorDetailsElement.style.display = 'block'; }
+            const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
+            statusBox.className = 'result-status-box ' + (statusClasses[data.status] || 'status-indeterminate');
+            statusBox.innerText = data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
+            const detailLines = [...(data.logs || []), ...(data.status !== 'secure' ? data.nextChecks || [] : [])];
+            if (detailLines.length > 0) { errorDetailsElement.textContent = sanitizeDisplayText(detailLines.join('\n')); errorDetailsElement.style.display = 'block'; }
             if (data.diagram) renderDiagram(data.diagram);
         }
     } catch (error) {
-        statusBox.className = 'result-status-box status-failed';
-        statusBox.innerText = '通信エラーが発生しました';
-        errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)));
+        statusBox.className = 'result-status-box status-indeterminate';
+        statusBox.innerText = '判定不能（通信エラー）';
+        errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)) + '\n権威サーバーへの疎通を確認し、時間をおいて再試行してください。');
         errorDetailsElement.style.display = 'block';
         renderDiagram(emptyDiagram(domain));
     }
