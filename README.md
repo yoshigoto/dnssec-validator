@@ -71,7 +71,7 @@ location / {
 
 ### テスト
 
-外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、権威サーバー間 RRset 比較、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
+外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、CDS/CDNSKEY 提案と親DSの比較、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、権威サーバー間 RRset 比較、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
 
 ```bash
 npm test
@@ -112,6 +112,12 @@ Content-Type: application/json
     "authorityChecks": {
       "parent": { "nameservers": {}, "ds": {} },
       "child": { "nameservers": {}, "dnskey": {} }
+    },
+    "dsProposal": {
+      "parentDs": [],
+      "cds": { "status": "match", "proposed": [], "toAdd": [], "toRemove": [] },
+      "cdnskey": { "status": "match", "proposed": [], "toAdd": [], "toRemove": [] },
+      "notes": []
     }
   }
 }
@@ -119,6 +125,7 @@ Content-Type: application/json
 
 `success` は親ゾーンの DS と子ゾーンの DNSKEY が一致した場合に `true` になります。詳細な検証結果やエラーは `logs` と `diagram` に格納されます。
 `diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
+`diagram.dsProposal` には、親のDSと子のCDS / CDNSKEYが提案するDSの比較結果が含まれます。`status` は `match`、`different`、`delete`、`absent`、`error` のいずれかです。
 
 入力不備の場合は `400`、レート制限超過時は `429`、サーバー内部エラー時は `500` を返します。
 
