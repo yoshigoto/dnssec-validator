@@ -43,6 +43,18 @@
         .node-title { font-weight: bold; font-size: 15px; }
         .node-meta { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; margin-left: 14px; }
         .signature-failed { color: var(--bad); }
+        .authority-checks { display: none; margin-top: 24px; font-family: sans-serif; }
+        .authority-checks h2 { margin: 0 0 10px; font-size: 17px; }
+        .authority-table-wrap { overflow-x: auto; border: 1px solid var(--line); }
+        .authority-checks table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 12px; }
+        .authority-checks th, .authority-checks td { padding: 9px 10px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+        .authority-checks thead th { background: #f1f5f9; color: var(--ink); font-weight: bold; }
+        .authority-checks tbody tr:last-child td { border-bottom: 0; }
+        .authority-checks .authority-group-row { background: #f8fafc; }
+        .authority-status { font-weight: bold; white-space: nowrap; }
+        .status-consistent { color: var(--good); }
+        .status-difference { color: var(--bad); }
+        .status-incomplete { color: #9a3412; }
         .arrow { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; min-height: 80px; }
         .arrow::before { content: ''; position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--line); z-index: 0; }
         .arrow::after { content: ''; position: absolute; left: 50%; bottom: -1px; width: 9px; height: 9px; border-right: 2px solid var(--line); border-bottom: 2px solid var(--line); transform: translateX(-50%) rotate(45deg); z-index: 0; }
@@ -109,6 +121,16 @@
                 <div id="chainArrow" class="arrow chain-arrow"></div>
             </div>
             <div class="legend">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
+            <section id="authorityChecks" class="authority-checks" aria-live="polite">
+                <h2>権威サーバー間の応答比較</h2>
+                <p>親の委任NS・DSと子の権威NS・DNSKEYを比較します。RRSIGはこの表の比較対象外です。</p>
+                <div class="authority-table-wrap">
+                    <table>
+                        <thead><tr><th>ネームサーバー</th><th>応答IP</th><th>RRsetの内容（要約）</th></tr></thead>
+                        <tbody id="authorityChecksBody"></tbody>
+                    </table>
+                </div>
+            </section>
         </section>
     </div>
     <footer class="footer">
