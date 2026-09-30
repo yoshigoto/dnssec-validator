@@ -14,6 +14,7 @@ import {
     getZoneApex,
     getARecord,
     getResourceRecord,
+    compareAuthorityRecordSets,
     verifyDnskeyWithDs,
     isZoneSigningKey,
     calculateKeyTag,
@@ -379,6 +380,58 @@ test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSEC
     });
 
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
+});
+
+test('権威サーバー間のNS RRsetを順序に依存せず比較する', async () => {
+    const result = await compareAuthorityRecordSets('child.example.test', ['ns1.test', 'ns2.test'], 'NS', {
+        resolveHostnameIPv4Self: async hostname => hostname === 'ns1.test' ? '192.0.2.1' : '192.0.2.2',
+        queryDirectlyUDP: async (domain, serverIp, cache, type, queryOptions) => {
+            assert.equal(domain, 'child.example.test');
+            assert.equal(type, 'NS');
+            assert.deepEqual(queryOptions, { useEdns: true, dnssecOk: true });
+            const records = [
+                { name: 'child.example.test', type: 'NS', data: 'ns1.child.test.' },
+                { name: 'child.example.test', type: 'NS', data: 'ns2.child.test.' }
+            ];
+            return {
+                rcode: 'NOERROR',
+                answers: serverIp === '192.0.2.1' ? records : records.reverse(),
+                authorities: []
+            };
+        }
+    });
+
+    assert.equal(result.complete, true);
+    assert.equal(result.consistent, true);
+    assert.equal(result.hasDifferences, false);
+    assert.deepEqual(result.servers.map(server => server.recordCount), [2, 2]);
+});
+
+test('権威サーバー間のDS差分と問い合わせ失敗を報告する', async () => {
+    const result = await compareAuthorityRecordSets('child.example.test', ['ns1.test', 'ns2.test', 'ns3.test'], 'DS', {
+        resolveHostnameIPv4Self: async hostname => ({
+            'ns1.test': '192.0.2.1',
+            'ns2.test': '192.0.2.2',
+            'ns3.test': '192.0.2.3'
+        })[hostname],
+        queryDirectlyUDP: async (domain, serverIp) => {
+            if (serverIp === '192.0.2.3') return { error: 'TIMEOUT' };
+            return {
+                rcode: 'NOERROR',
+                answers: [{
+                    name: 'child.example.test',
+                    type: 'DS',
+                    data: { keyTag: 1234, algorithm: 13, digestType: 2, digest: Buffer.alloc(32, serverIp.endsWith('.1') ? 1 : 2) }
+                }],
+                authorities: []
+            };
+        }
+    });
+
+    assert.equal(result.complete, false);
+    assert.equal(result.consistent, false);
+    assert.equal(result.hasDifferences, true);
+    assert.deepEqual(result.servers.map(server => server.status), ['ok', 'ok', 'error']);
 });
 
 test('out-of-bailiwick の参照アドレスを追加セクションから採用する', async () => {

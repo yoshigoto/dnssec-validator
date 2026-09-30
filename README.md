@@ -50,14 +50,7 @@ nvm use
 npm install
 npm start
 ```
-
-`nvm` が未導入の場合は、Ubuntu 側でインストールしてからシェルを再起動してください。Node.js 18 以上で動作します。
-
-起動後、次の URL を開きます。
-
-<http://localhost:3002/>
-
-このアプリは `127.0.0.1:3002` のみで待ち受けます。ポート番号を変更する場合は、`dnssec-validator.js` の `PORT` 定数を変更し、nginx の upstream も合わせてください。nginx は同一ホストの loopback を指定して転送します。
+- 親・子それぞれの全権威サーバーから NS / DS / DNSKEY を取得し、RRset の差分や応答失敗を比較
 
 ```nginx
 location / {
@@ -70,18 +63,22 @@ location / {
 ### テスト
 
 外部 DNS サーバーへ接続せず、入力バリデーション、DNSSEC の DS/DNSKEY 突合、署名期限、ZSK ビット判定、NSEC/NSEC3 の A レコード不存在証明と NXDOMAIN 証明、ゾーン頂点の探索、親子が同じネームサーバーになるケース、グルー選択と NS フォールバック、UDP/TCP 切り替え、HTTP エンドポイント、セキュリティヘッダーを確認できます。
-
+    "checks": {},
+    "authorityChecks": {
+      "parent": { "nameservers": {}, "ds": {} },
+      "child": { "nameservers": {}, "dnskey": {} }
+    }
 ```bash
 npm test
 ```
 
 VS Code では WSL 拡張機能でこのフォルダーを開くと、統合ターミナル、起動設定、テスト設定が Ubuntu 側で実行されます。
+`diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
 
 テスト本体は `test/dnssec-validator.test.js` にあります。実際の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
 
 ## API
 
-画面からの検証処理は、次のエンドポイントを使用します。
 
 ### `POST /api/validate`
 

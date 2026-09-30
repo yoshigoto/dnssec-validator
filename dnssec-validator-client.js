@@ -92,10 +92,62 @@ function setNodeContent(nodeId, title, titleColor, lines) {
 }
 
 function emptyDiagram(domain) {
-    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false } };
+    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null };
+}
+
+function renderAuthorityComparisons(authorityChecks) {
+    const section = document.getElementById('authorityChecks');
+    const tableBody = document.getElementById('authorityChecksBody');
+    tableBody.replaceChildren();
+    if (!authorityChecks) {
+        section.style.display = 'none';
+        return;
+    }
+
+    const groups = [
+        ['親の委任NS RRset', authorityChecks.parent && authorityChecks.parent.nameservers],
+        ['親のDS RRset', authorityChecks.parent && authorityChecks.parent.ds],
+        ['子の権威NS RRset', authorityChecks.child && authorityChecks.child.nameservers],
+        ['子のDNSKEY RRset', authorityChecks.child && authorityChecks.child.dnskey]
+    ];
+    for (const [title, comparison] of groups) {
+        if (!comparison) continue;
+        const groupRow = document.createElement('tr');
+        groupRow.className = 'authority-group-row';
+        const groupCell = document.createElement('th');
+        groupCell.scope = 'rowgroup';
+        groupCell.textContent = title;
+        const statusCell = document.createElement('td');
+        const status = comparison.hasDifferences
+            ? 'サーバー間に差分あり'
+            : comparison.complete && comparison.consistent
+                ? '全台の応答一致'
+                : '一部未確認';
+        statusCell.className = comparison.hasDifferences ? 'authority-status status-difference' : comparison.complete && comparison.consistent ? 'authority-status status-consistent' : 'authority-status status-incomplete';
+        statusCell.textContent = status;
+        groupCell.colSpan = 2;
+        groupRow.append(groupCell, statusCell);
+        tableBody.appendChild(groupRow);
+
+        for (const server of comparison.servers || []) {
+            const row = document.createElement('tr');
+            const nameCell = document.createElement('td');
+            nameCell.textContent = sanitizeDisplayText(server.name);
+            const addressCell = document.createElement('td');
+            addressCell.textContent = sanitizeDisplayText(server.ip || '未取得');
+            const recordsCell = document.createElement('td');
+            recordsCell.textContent = server.status === 'error'
+                ? '取得失敗: ' + sanitizeDisplayText(server.error)
+                : (server.records && server.records.length ? sanitizeDisplayLines(server.records).join('、') : '該当RRsetなし') + (server.rcode ? ' / ' + sanitizeDisplayText(server.rcode) : '');
+            row.append(nameCell, addressCell, recordsCell);
+            tableBody.appendChild(row);
+        }
+    }
+    section.style.display = 'block';
 }
 
 function renderDiagram(diagram) {
+    renderAuthorityComparisons(diagram.authorityChecks);
     const parentKey = diagram.parent.dnskey.filter(key => key.flags === 256);
     const childKsk = diagram.child.dnskey.filter(key => key.flags === 257);
     document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';

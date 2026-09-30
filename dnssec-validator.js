@@ -130,6 +130,74 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
     return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
+function getAuthorityRecordValue(record) {
+    if (record.type === 'DS') {
+        return [record.data.keyTag, record.data.algorithm, record.data.digestType, Buffer.from(record.data.digest).toString('hex')];
+    }
+    if (record.type === 'DNSKEY') {
+        return [record.data.flags, record.data.protocol, record.data.algorithm, Buffer.from(record.data.key).toString('hex')];
+    }
+    if (record.type === 'NS') {
+        return [normalizeResolverDnsName(record.data)];
+    }
+    return [normalizeResolverDnsName(record.name), record.type, JSON.stringify(record.data)];
+}
+
+function summarizeAuthorityRecord(record) {
+    if (record.type === 'DS') {
+        return `Key Tag ${record.data.keyTag} / alg ${record.data.algorithm} / digest ${record.data.digestType}`;
+    }
+    if (record.type === 'DNSKEY') {
+        return `Key Tag ${calculateKeyTag(record.data.algorithm, buildDnskeyFullRdata(record.data))} / alg ${record.data.algorithm} / flags ${record.data.flags}`;
+    }
+    return normalizeResolverDnsName(record.data);
+}
+
+async function compareAuthorityRecordSets(zoneApex, nameservers, recordType, options = {}) {
+    const queryUdp = options.queryDirectlyUDP || queryDirectlyUDP;
+    const dnsResponseCache = options.dnsResponseCache || dnssecResponseCache;
+    const normalizedApex = normalizeResolverDnsName(zoneApex);
+    const servers = await Promise.all(nameservers.map(async nameserver => {
+        try {
+            const serverIp = await getARecord(nameserver, {
+                queryDirectlyUDP: queryUdp,
+                resolveHostnameIPv4Self: options.resolveHostnameIPv4Self,
+                knownAddresses: options.knownAddresses,
+                dnsResponseCache
+            });
+            const response = await queryUdp(zoneApex, serverIp, dnsResponseCache, recordType, { useEdns: true, dnssecOk: true });
+            if (response.error) {
+                throw new Error(`${response.error}${response.detail ? ` (${response.detail})` : ''}`);
+            }
+            const sections = recordType === 'NS' ? [...(response.answers || []), ...(response.authorities || [])] : (response.answers || []);
+            const records = sections.filter(record => record.type === recordType && normalizeResolverDnsName(record.name) === normalizedApex);
+            const values = [...new Set(records.map(record => JSON.stringify(getAuthorityRecordValue(record))))].sort();
+            return {
+                name: normalizeResolverDnsName(nameserver),
+                ip: serverIp,
+                status: 'ok',
+                rcode: response.rcode || '',
+                recordCount: records.length,
+                records: records.map(summarizeAuthorityRecord),
+                fingerprint: JSON.stringify(values)
+            };
+        } catch (error) {
+            return { name: normalizeResolverDnsName(nameserver), ip: '', status: 'error', error: error.message };
+        }
+    }));
+
+    const successfulServers = servers.filter(server => server.status === 'ok');
+    const fingerprints = new Set(successfulServers.map(server => server.fingerprint));
+    const complete = servers.length > 0 && successfulServers.length === servers.length;
+    return {
+        recordType,
+        complete,
+        consistent: complete && fingerprints.size === 1,
+        hasDifferences: fingerprints.size > 1,
+        servers: servers.map(({ fingerprint, ...server }) => server)
+    };
+}
+
 // --- ヘルパー関数: Aレコードを取得する ---
 async function getARecord(domain, options = {}) {
     if (net.isIP(domain)) {
@@ -1012,7 +1080,8 @@ app.post('/api/validate', async (req, res) => {
     const diagram = {
         parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [] },
         child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null },
-        checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }
+        checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false },
+        authorityChecks: null
     };
 
     // 大きな鍵長(ML-DSA等)でDNSのTCPフォールバックが多発すると処理が長引くため、
@@ -1035,6 +1104,23 @@ app.post('/api/validate', async (req, res) => {
         diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || zoneApexInfo.parentNs || zoneApexInfo.currentNs;
         diagram.child.name = zoneApexInfo.zoneApex;
         diagram.child.server = zoneApexInfo.childNameservers.join(', ') || zoneApexInfo.currentNs;
+        const parentAuthorityNames = zoneApexInfo.parentNameservers.length > 0
+            ? zoneApexInfo.parentNameservers
+            : zoneApexInfo.parentNs ? [zoneApexInfo.parentNs] : [];
+        const childAuthorityNames = zoneApexInfo.childNameservers.length > 0
+            ? zoneApexInfo.childNameservers
+            : [zoneApexInfo.currentNs];
+        const comparisonOptions = { dnsResponseCache: dnssecResponseCache };
+        const [parentNsComparison, parentDsComparison, childNsComparison, childDnskeyComparison] = await Promise.all([
+            compareAuthorityRecordSets(zoneApexInfo.zoneApex, parentAuthorityNames, 'NS', comparisonOptions),
+            compareAuthorityRecordSets(zoneApexInfo.zoneApex, parentAuthorityNames, 'DS', comparisonOptions),
+            compareAuthorityRecordSets(zoneApexInfo.zoneApex, childAuthorityNames, 'NS', comparisonOptions),
+            compareAuthorityRecordSets(zoneApexInfo.zoneApex, childAuthorityNames, 'DNSKEY', comparisonOptions)
+        ]);
+        diagram.authorityChecks = {
+            parent: { nameservers: parentNsComparison, ds: parentDsComparison },
+            child: { nameservers: childNsComparison, dnskey: childDnskeyComparison }
+        };
         let tempLog = '';
         if (zoneApexInfo.parentNs !== '') {
             tempLog += `${zoneApexInfo.parentNs} または `;
@@ -1361,6 +1447,7 @@ export {
     getZoneApex,
     getARecord,
     getResourceRecord,
+    compareAuthorityRecordSets,
     verifyDnskeyWithDs,
     isZoneSigningKey,
     calculateKeyTag,
