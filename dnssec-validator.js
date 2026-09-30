@@ -512,6 +512,84 @@ function buildDnskeyFullRdata(dnskeyData) {
     return Buffer.concat([headerBuf, getDnskeyRawKey(dnskeyData)]);
 }
 
+function dsSummary(data) {
+    return { keyTag: data.keyTag, algorithm: data.algorithm, digestType: data.digestType, digest: Buffer.from(data.digest).toString('hex').toLowerCase() };
+}
+
+function compareProposedDs(proposals, parentDs) {
+    const fingerprint = record => `${record.keyTag}/${record.algorithm}/${record.digestType}/${record.digest}`;
+    const parent = new Set(parentDs.map(fingerprint));
+    const proposed = new Set(proposals.map(fingerprint));
+    return {
+        status: proposed.size === 0 ? 'absent' : proposed.size === parent.size && [...proposed].every(value => parent.has(value)) ? 'match' : 'different',
+        proposed: proposals,
+        toAdd: proposals.filter(record => !parent.has(fingerprint(record))),
+        toRemove: parentDs.filter(record => !proposed.has(fingerprint(record)))
+    };
+}
+
+async function diagnoseDsProposals(zoneApex, parentDsInfo, childIp, options = {}) {
+    const result = { parentDs: [], cds: null, cdnskey: null, notes: [] };
+    if (!parentDsInfo || parentDsInfo.rcode !== 'NOERROR') {
+        result.notes.push('親側DSを確認できないため、提案との差分は判定できません。');
+        return result;
+    }
+    result.parentDs = parentDsInfo.resourceRecords.filter(record => normalizeDomainName(record.name) === normalizeDomainName(zoneApex)).map(record => dsSummary(record.data));
+    const [cdsResponse, cdnskeyResponse] = await Promise.allSettled([
+        getResourceRecord(zoneApex, childIp, 'CDS', options),
+        getResourceRecord(zoneApex, childIp, 'CDNSKEY', options)
+    ]);
+    for (const [type, response] of [['cds', cdsResponse], ['cdnskey', cdnskeyResponse]]) {
+        if (response.status === 'rejected' || response.value.rcode !== 'NOERROR') {
+            result[type] = { status: 'error', error: response.status === 'rejected' ? response.reason.message : `応答コード: ${response.value.rcode}` };
+            continue;
+        }
+        try {
+            const records = response.value.resourceRecords.filter(record => normalizeDomainName(record.name) === normalizeDomainName(zoneApex));
+            const proposals = records.map(record => {
+                const raw = record.data;
+                if (!Buffer.isBuffer(raw) || raw.length < 5) throw new Error('RDATAが不正です');
+                if (type === 'cds') return dsSummary({ keyTag: raw.readUInt16BE(0), algorithm: raw[2], digestType: raw[3], digest: raw.subarray(4) });
+                if (raw[2] !== 3) throw new Error('CDNSKEYのProtocolが3ではありません');
+                return { flags: raw.readUInt16BE(0), protocol: raw[2], algorithm: raw[3], key: raw.subarray(4) };
+            });
+            const deletion = proposals.length === 1 && (type === 'cds'
+                ? proposals[0].keyTag === 0 && proposals[0].algorithm === 0 && proposals[0].digestType === 0 && proposals[0].digest === '00'
+                : proposals[0].flags === 0 && proposals[0].algorithm === 0 && proposals[0].key.length === 1 && proposals[0].key[0] === 0);
+            if (deletion) {
+                result[type] = { status: 'delete', proposed: [], toAdd: [], toRemove: result.parentDs };
+            } else if (type === 'cds') {
+                result[type] = compareProposedDs(proposals, result.parentDs);
+            } else {
+                const digestTypes = [...new Set(result.parentDs.map(record => record.digestType).filter(digestType => [1, 2, 4].includes(digestType)))];
+                if (digestTypes.length === 0) digestTypes.push(2);
+                const hashes = { 1: 'sha1', 2: 'sha256', 4: 'sha384' };
+                const dsRecords = proposals.flatMap(key => digestTypes.map(digestType => ({
+                    keyTag: calculateKeyTag(key.algorithm, buildDnskeyFullRdata(key)),
+                    algorithm: key.algorithm,
+                    digestType,
+                    digest: crypto.createHash(hashes[digestType]).update(encodeDomainNameCanonical(zoneApex)).update(buildDnskeyFullRdata(key)).digest('hex')
+                })));
+                result[type] = compareProposedDs(dsRecords, result.parentDs);
+                result[type].digestTypes = digestTypes;
+            }
+        } catch (error) {
+            result[type] = { status: 'error', error: error.message };
+        }
+    }
+    const cdsProposal = result.cds?.proposed?.map(record => JSON.stringify(record)).sort();
+    const cdnskeyProposal = result.cdnskey?.proposed?.map(record => JSON.stringify(record)).sort();
+    if (['match', 'different', 'delete'].includes(result.cds?.status) && ['match', 'different', 'delete'].includes(result.cdnskey?.status) &&
+        (result.cds.status !== result.cdnskey.status || JSON.stringify(cdsProposal) !== JSON.stringify(cdnskeyProposal))) {
+        result.notes.push('CDSとCDNSKEYの提案が異なる可能性があります。両方の内容を確認してください。');
+    }
+    if (result.cds?.status === 'absent' && result.cdnskey?.status === 'absent') result.notes.push('子ゾーンからのDS変更提案はありません。');
+    if (result.parentDs.some(record => ![1, 2, 4].includes(record.digestType)) && result.cdnskey?.status !== 'absent') {
+        result.notes.push('親DSに未対応のDigest Typeがあり、CDNSKEYからの比較には含めていません。');
+    }
+    return result;
+}
+
 // --- ヘルパー関数: RRSIG 署名の検証 (メイン関数) ---
 // rrset: 同じ Type Covered を持つ全リソースレコードの配列 (RFC 4034 の署名対象RRset)
 function verifyRRSIGSignature(rrset, rrsig, dnskeyRecord, domain) {
@@ -1161,7 +1239,8 @@ app.post('/api/validate', async (req, res) => {
         parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null },
         child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null },
         checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false },
-        authorityChecks: null
+        authorityChecks: null,
+        dsProposal: null
     };
 
     // 大きな鍵長(ML-DSA等)でDNSのTCPフォールバックが多発すると処理が長引くため、
@@ -1227,6 +1306,18 @@ app.post('/api/validate', async (req, res) => {
         } catch (err) {
             logs.push(`親サーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
             parentIp = '';
+        }
+
+        let childIp = '';
+        if (parentDsInfo) {
+            try {
+                childIp = await getARecord(zoneApexInfo.currentNs);
+                diagram.dsProposal = await diagnoseDsProposals(zoneApexInfo.zoneApex, parentDsInfo, childIp);
+            } catch (err) {
+                diagram.dsProposal = { parentDs: [], cds: null, cdnskey: null, notes: [`子ゾーンの提案を取得できませんでした: ${err.message}`] };
+            }
+        } else {
+            diagram.dsProposal = { parentDs: [], cds: null, cdnskey: null, notes: ['親側DSを取得できないため、提案との差分は判定できません。'] };
         }
         
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
@@ -1359,9 +1450,8 @@ app.post('/api/validate', async (req, res) => {
         }
 
         // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得
-        let childIp = '';
         try {
-            childIp = await getARecord(zoneApexInfo.currentNs);
+            childIp = childIp || await getARecord(zoneApexInfo.currentNs);
         } catch (err) {
             return sendJson(200, { success: false, logs: [...logs, `子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
         }
@@ -1581,6 +1671,7 @@ export {
     getARecord,
     getResourceRecord,
     compareAuthorityRecordSets,
+    diagnoseDsProposals,
     verifyDnskeyWithDs,
     isZoneSigningKey,
     calculateKeyTag,

@@ -92,7 +92,32 @@ function setNodeContent(nodeId, title, titleColor, lines) {
 }
 
 function emptyDiagram(domain) {
-    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null };
+    return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null, dsProposal: null };
+}
+
+function renderDsProposal(diagnosis) {
+    const section = document.getElementById('dsProposal');
+    const content = document.getElementById('dsProposalContent');
+    content.replaceChildren();
+    section.style.display = diagnosis ? 'block' : 'none';
+    if (!diagnosis) return;
+    const formatDs = record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest type ' + record.digestType + ' / ' + record.digest;
+    const addLine = text => {
+        const line = document.createElement('p');
+        line.textContent = sanitizeDisplayText(text);
+        content.appendChild(line);
+    };
+    addLine('親に登録されたDS: ' + (diagnosis.parentDs.length ? diagnosis.parentDs.map(formatDs).join('、') : diagnosis.cds ? 'なし' : '未確認'));
+    for (const [label, comparison] of [['CDS', diagnosis.cds], ['CDNSKEYから算出したDS', diagnosis.cdnskey]]) {
+        if (!comparison) continue;
+        const status = { match: '親DSと一致', different: '親DSと差分あり', absent: '提案なし', delete: 'DS削除シグナル', error: '取得・解析失敗' };
+        addLine(label + ': ' + status[comparison.status] + (comparison.error ? ' (' + comparison.error + ')' : ''));
+        if (comparison.status === 'different') {
+            for (const record of comparison.toAdd) addLine('  子の提案のみ: ' + formatDs(record));
+            for (const record of comparison.toRemove) addLine('  親の登録のみ: ' + formatDs(record));
+        }
+    }
+    for (const note of diagnosis.notes || []) addLine(note);
 }
 
 function renderAuthorityComparisons(authorityChecks) {
@@ -148,6 +173,7 @@ function renderAuthorityComparisons(authorityChecks) {
 
 function renderDiagram(diagram) {
     renderAuthorityComparisons(diagram.authorityChecks);
+    renderDsProposal(diagram.dsProposal);
     const parentKey = diagram.parent.dnskey.filter(key => key.flags === 256);
     const childKsk = diagram.child.dnskey.filter(key => key.flags === 257);
     document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
