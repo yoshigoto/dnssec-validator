@@ -227,6 +227,7 @@ async function getZoneApex(domain, options = {}) {
     let parentNameservers = [];
     let childNameservers = [];
     let zoneApex = '';
+    let lastDelegationZone = '';
     let rcode = '';
     let hasCnameOrDname = false;
 
@@ -292,6 +293,7 @@ async function getZoneApex(domain, options = {}) {
             if (nsRecords.length > 0) {
                 parentNameservers = childNameservers;
                 childNameservers = nsRecords.map(record => record.data);
+                lastDelegationZone = normalizeResolverDnsName(nsRecords[0].name);
                 // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
@@ -318,6 +320,30 @@ async function getZoneApex(domain, options = {}) {
                 parentNs = currentNs;
                 currentNs = chosenNsIp || chosenNsRecord.data;
             }
+        }
+    }
+
+    if (zoneApex && childNameservers.length > 0 && lastDelegationZone !== normalizeResolverDnsName(zoneApex)) {
+        parentNameservers = childNameservers;
+        parentNs = parentNameservers[0];
+        childNameservers = [];
+        for (const nameserver of parentNameservers) {
+            try {
+                const serverIp = await getARecord(nameserver, {
+                    queryDirectlyUDP: queryUdp,
+                    resolveHostnameIPv4Self: resolveIPv4,
+                    knownAddresses: options.knownAddresses,
+                    dnsResponseCache
+                });
+                const response = await queryUdp(zoneApex, serverIp, dnsResponseCache, 'NS', { useEdns: true, dnssecOk: true });
+                if (response.error) continue;
+                const nsRecords = [...(response.answers || []), ...(response.authorities || [])].filter(record =>
+                    record.type === 'NS' && normalizeResolverDnsName(record.name) === normalizeResolverDnsName(zoneApex));
+                if (nsRecords.length === 0) continue;
+                childNameservers = [...new Map(nsRecords.map(record => [normalizeResolverDnsName(record.data), record.data])).values()];
+                currentNs = childNameservers[0];
+                break;
+            } catch (error) { }
         }
     }
 

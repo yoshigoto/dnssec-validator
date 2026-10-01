@@ -687,6 +687,48 @@ test('親子ゾーンの NS RRset を委任応答から個別に保持する', a
     assert.deepEqual(result.childNameservers, ['ns1.child.test', 'ns2.child.test']);
 });
 
+test('親サーバーが子ゾーンにも権威を持つ場合に親子のNSを個別に特定する', async () => {
+    const requests = [];
+    const result = await getZoneApex('www.child.parent.test', {
+        initialNameserver: '192.0.2.1',
+        resolveHostnameIPv4Self: async hostname => hostname === 'ns.parent.test' ? '192.0.2.2' : null,
+        queryDirectlyUDP: async (domain, serverIp, cache, type) => {
+            requests.push({ domain, serverIp, type });
+            if (serverIp === '192.0.2.1') {
+                return {
+                    rcode: 'NOERROR',
+                    authorities: [{ name: 'parent.test', type: 'NS', data: 'ns.parent.test', ttl: 300 }],
+                    additionals: [{ name: 'ns.parent.test', type: 'A', data: '192.0.2.2', ttl: 300 }]
+                };
+            }
+            if (type === 'SOA') {
+                return {
+                    rcode: 'NOERROR',
+                    flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                    answers: [{ name: 'child.parent.test', type: 'SOA', data: {} }]
+                };
+            }
+            return {
+                rcode: 'NOERROR',
+                answers: [
+                    { name: 'child.parent.test', type: 'NS', data: 'ns1.child.parent.test' },
+                    { name: 'child.parent.test', type: 'NS', data: 'ns2.child.parent.test' }
+                ]
+            };
+        }
+    });
+
+    assert.deepEqual(requests, [
+        { domain: 'www.child.parent.test', serverIp: '192.0.2.1', type: 'SOA' },
+        { domain: 'www.child.parent.test', serverIp: '192.0.2.2', type: 'SOA' },
+        { domain: 'child.parent.test', serverIp: '192.0.2.2', type: 'NS' }
+    ]);
+    assert.equal(result.zoneApex, 'child.parent.test');
+    assert.equal(result.parentNs, 'ns.parent.test');
+    assert.deepEqual(result.parentNameservers, ['ns.parent.test']);
+    assert.deepEqual(result.childNameservers, ['ns1.child.parent.test', 'ns2.child.parent.test']);
+});
+
 test('GET / は UI を返し、セキュリティヘッダーを付ける', async () => {
     const server = app.listen(0);
     try {
