@@ -248,9 +248,19 @@ test('検証結果をSecure、Insecure、Bogus、判定不能に分類する', (
         child: { aRecordValidation: { queried: true, recordsFound: true, signatures: [{ trustChainVerified: true }] } }
     };
     assert.equal(classifyValidationResult(secureDiagram).status, 'secure');
-    assert.equal(classifyValidationResult({ parent: { ds: [], dsAbsenceProof: { verified: true } } }).status, 'insecure');
-    assert.equal(classifyValidationResult({ parent: { ds: [{ keyTag: 1 }] }, checks: { dsKeyMatch: false }, child: { dnskey: [{ keyTag: 2 }] } }).status, 'bogus');
-    assert.equal(classifyValidationResult(secureDiagram, true).status, 'indeterminate');
+    const insecureResult = classifyValidationResult({ parent: { ds: [], dsAbsenceProof: { verified: true } } });
+    assert.equal(insecureResult.status, 'insecure');
+    assert.ok(insecureResult.nextChecks.length > 0);
+    assert.ok(insecureResult.nextChecks.every(check => !check.startsWith('・')));
+
+    const bogusResult = classifyValidationResult({ parent: { ds: [{ keyTag: 1 }] }, checks: { dsKeyMatch: false }, child: { dnskey: [{ keyTag: 2 }] } });
+    assert.equal(bogusResult.status, 'bogus');
+    assert.ok(bogusResult.nextChecks.length > 0);
+    assert.ok(bogusResult.nextChecks.every(check => !check.startsWith('・')));
+
+    const timeoutResult = classifyValidationResult(secureDiagram, true);
+    assert.equal(timeoutResult.status, 'indeterminate');
+    assert.ok(timeoutResult.nextChecks.every(check => !check.startsWith('・')));
 });
 
 test('NSEC3によるAレコード不存在証明を検出する', () => {

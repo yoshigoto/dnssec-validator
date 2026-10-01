@@ -724,26 +724,26 @@ function classifyValidationResult(diagram, timedOut = false) {
     const parent = diagram && diagram.parent || {};
     const child = diagram && diagram.child || {};
     const aRecordValidation = child.aRecordValidation;
-    if (timedOut) return { status: 'indeterminate', statusLabel: '判定不能（タイムアウト）', nextChecks: ['・権威サーバーへの疎通を確認し、時間をおいて再試行してください。'] };
+    if (timedOut) return { status: 'indeterminate', statusLabel: '判定不能（タイムアウト）', nextChecks: ['権威サーバーへの疎通を確認し、時間をおいて再試行してください。'] };
     if (parent.dsAbsenceProof && parent.dsAbsenceProof.verified === true) {
-        return { status: 'insecure', statusLabel: 'Insecure（未署名の委任）', nextChecks: ['・親側のNSEC/NSEC3不在証明を検証しました。DNSSECを使う場合は、子ゾーンのDNSKEY/RRSIGを整えて親にDSを登録してください。', '・未署名運用が意図したものか、ドメイン管理者に確認してください。'] };
+        return { status: 'insecure', statusLabel: 'Insecure（未署名の委任）', nextChecks: ['親側のNSEC/NSEC3不在証明を検証しました。DNSSECを使う場合は、子ゾーンのDNSKEY/RRSIGを整えて親にDSを登録してください。', '未署名運用が意図したものか、ドメイン管理者に確認してください。'] };
     }
     if (!parent.ds || parent.ds.length === 0) {
-        return { status: 'indeterminate', statusLabel: '判定不能（DS不在を確認できません）', nextChecks: ['・親側のNSEC/NSEC3不在証明とそのRRSIGが取得・検証できるか確認してください。', '・親の権威サーバーへの疎通を確認して再試行してください。'] };
+        return { status: 'indeterminate', statusLabel: '判定不能（DS不在を確認できません）', nextChecks: ['親側のNSEC/NSEC3不在証明とそのRRSIGが取得・検証できるか確認してください。', '親の権威サーバーへの疎通を確認して再試行してください。'] };
     }
     if (isValidationSuccessful(diagram)) {
         return { status: 'secure', statusLabel: 'Secure（検証成功）', nextChecks: ['追加確認は不要です。'] };
     }
     if (aRecordValidation && aRecordValidation.error) {
-        return { status: 'indeterminate', statusLabel: '判定不能（検証データ不足）', nextChecks: ['・権威サーバーへの疎通と応答を確認し、時間をおいて再試行してください。'] };
+        return { status: 'indeterminate', statusLabel: '判定不能（検証データ不足）', nextChecks: ['権威サーバーへの疎通と応答を確認し、時間をおいて再試行してください。'] };
     }
     if (!child.dnskey || child.dnskey.length === 0) {
-        return { status: 'indeterminate', statusLabel: '判定不能（子DNSKEY未取得）', nextChecks: ['・子ゾーンの権威サーバーとDNSKEY応答を確認してください。'] };
+        return { status: 'indeterminate', statusLabel: '判定不能（子DNSKEY未取得）', nextChecks: ['子ゾーンの権威サーバーとDNSKEY応答を確認してください。'] };
     }
     if (checks.dsKeyMatch === false || (parent.rrsig && parent.rrsig.length === 0) || (parent.dnskey && parent.dnskey.length > 0 && parent.rrsig && parent.rrsig.some(signature => signature.verified === false)) || (checks.dnskeySignature === false && child.rrsig && child.rrsig.some(signature => signature.verified === false)) || (aRecordValidation && ((aRecordValidation.recordsFound && (aRecordValidation.signatures || []).some(signature => signature.trustChainVerified !== true)) || (!aRecordValidation.recordsFound && aRecordValidation.denialProof && aRecordValidation.denialProof.verified !== true)))) {
-        return { status: 'bogus', statusLabel: 'Bogus（DNSSEC検証失敗）', nextChecks: ['・親のDSと子のKSK/DNSKEYのKey Tag・アルゴリズム・Digestを照合してください。', '・DNSKEY RRsetおよび対象レコードのRRSIGの有効期間・署名鍵・不在証明を確認してください。', '・鍵更新後であれば、親のDS更新と各権威サーバーへの反映状況を確認してください。'] };
+        return { status: 'bogus', statusLabel: 'Bogus（DNSSEC検証失敗）', nextChecks: ['親のDSと子のKSK/DNSKEYのKey Tag・アルゴリズム・Digestを照合してください。', 'DNSKEY RRsetおよび対象レコードのRRSIGの有効期間・署名鍵・不在証明を確認してください。', '鍵更新後であれば、親のDS更新と各権威サーバーへの反映状況を確認してください。'] };
     }
-    return { status: 'indeterminate', statusLabel: '判定不能（検証情報不足）', nextChecks: ['・親子の権威サーバーから必要なRRset・RRSIGを取得できるか確認して再試行してください。'] };
+    return { status: 'indeterminate', statusLabel: '判定不能（検証情報不足）', nextChecks: ['親子の権威サーバーから必要なRRset・RRSIGを取得できるか確認して再試行してください。'] };
 }
         
 function verifyDSSignature(dsRecords, rrsig, dnskeyRecord, zoneName) {
