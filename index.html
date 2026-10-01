@@ -149,16 +149,6 @@
                 <div id="chainArrow" class="arrow chain-arrow"></div>
             </div>
             <div class="legend">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
-            <section id="dsProposal" class="ds-proposal" aria-live="polite">
-                <h2>CDS/CDNSKEY と親 DS の比較</h2>
-                <div id="dsProposalContent"></div>
-                <ul>
-                    <li>ゾーン頂点の探索で見つけた親側・子側それぞれ 1台の権威サーバーから取得したレコードによる診断です。</li>
-                    <li>親側での自動変更や提案レコードの署名・信頼の検証は行いません。</li>
-                    <li>鍵ロールオーバーでは、新鍵に対応する DS が親に登録されていること、新鍵による DNSKEY の署名を検証できること、DS と DNSKEY の更新前の情報がキャッシュから消えるまで旧鍵を保持することを確認してください。</li>
-                    <li><a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a>の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親の DS RRset 全体を削除する要求です。実行されると DNSSEC の信頼の連鎖が途切れるため、意図した変更か確認してください。</li>
-                </ul>
-            </section>
             <section id="authorityChecks" class="authority-checks" aria-live="polite">
                 <h2>権威サーバー間の応答比較</h2>
                 <p>親の委任 NS/DS と子の権威 NS/DNSKEY を比較します。RRSIG はこの表の比較対象外です。</p>
@@ -168,6 +158,21 @@
                         <tbody id="authorityChecksBody"></tbody>
                     </table>
                 </div>
+            </section>
+            <section id="dsProposal" class="ds-proposal" aria-live="polite">
+                <h2>CDS/CDNSKEY と親 DS の比較</h2>
+                <div id="dsProposalContent"></div>
+                <ul>
+                    <li>ゾーン頂点の探索で見つけた親側・子側それぞれ 1台の権威サーバーから取得したレコードによる診断です。</li>
+                    <li>親側での自動変更や提案レコードの署名・信頼の検証は行いません。</li>
+                    <li>鍵ロールオーバーでは、以下を確認してください。</li>
+                    <ol>
+                        <li>新しい鍵に対応する DS が親に登録されていること。</li>
+                        <li>新しい鍵による DNSKEY の署名を検証できること。</li>
+                        <li>DS と DNSKEY の更新前の情報がキャッシュから消えるまで古い鍵を保持すること。</li>
+                    </ol>
+                    <li><a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a> の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親の DS RRset 全体を削除する要求です。これが実行されると DNSSEC の信頼の連鎖が途切れるため、意図した変更か確認してください。</li>
+                </ul>
             </section>
         </section>
     </div>
