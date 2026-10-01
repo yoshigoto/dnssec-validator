@@ -235,6 +235,25 @@ function renderDiagram(diagram) {
     document.getElementById('diagram').style.display = 'block';
 }
 
+function renderNextChecks(checks) {
+    const nextChecksBox = document.getElementById('nextChecksBox');
+    const nextChecksList = document.getElementById('nextChecksList');
+    if (!nextChecksBox || !nextChecksList) return;
+    const items = (checks || []).filter(Boolean);
+    if (items.length === 0) {
+        nextChecksBox.style.display = 'none';
+        nextChecksList.innerHTML = '';
+        return;
+    }
+    nextChecksList.innerHTML = '';
+    for (const item of items) {
+        const li = document.createElement('li');
+        li.textContent = sanitizeDisplayText(item);
+        nextChecksList.appendChild(li);
+    }
+    nextChecksBox.style.display = 'block';
+}
+
 async function validate(event) {
     event.preventDefault();
     let domain = domainInput.value.trim();
@@ -247,6 +266,7 @@ async function validate(event) {
     statusBox.innerText = '検証中... (権威サーバーへ直接クエリを送信しています)';
     errorDetailsElement.style.display = 'none';
     errorDetailsElement.textContent = '';
+    renderNextChecks([]);
     renderDiagram(emptyDiagram(domain));
     try {
         const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, recordType: recordTypeInput.value }) });
@@ -259,22 +279,35 @@ async function validate(event) {
         if (data.error) {
             statusBox.className = 'result-status-box status-indeterminate';
             statusBox.innerText = data.statusLabel || '判定不能（エラー）';
-            errorDetailsElement.textContent = sanitizeDisplayText([data.error, ...(data.logs || []), ...(data.nextChecks || [])].join('\n'));
-            errorDetailsElement.style.display = 'block';
+            const errorLines = [data.error, ...(data.logs || [])].filter(Boolean);
+            if (errorLines.length > 0) {
+                errorDetailsElement.textContent = sanitizeDisplayText(errorLines.join('\n'));
+                errorDetailsElement.style.display = 'block';
+            }
+            renderNextChecks(data.nextChecks);
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
             const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
             statusBox.className = 'result-status-box ' + (statusClasses[data.status] || 'status-indeterminate');
             statusBox.innerText = data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
-            const detailLines = [...(data.logs || []), ...(data.status !== 'secure' ? data.nextChecks || [] : [])];
-            if (detailLines.length > 0) { errorDetailsElement.textContent = sanitizeDisplayText(detailLines.join('\n')); errorDetailsElement.style.display = 'block'; }
+            const detailLines = [...(data.logs || [])];
+            if (detailLines.length > 0) {
+                errorDetailsElement.textContent = sanitizeDisplayText(detailLines.join('\n'));
+                errorDetailsElement.style.display = 'block';
+            }
+            if (data.status !== 'secure') {
+                renderNextChecks(data.nextChecks);
+            } else {
+                renderNextChecks([]);
+            }
             if (data.diagram) renderDiagram(data.diagram);
         }
     } catch (error) {
         statusBox.className = 'result-status-box status-indeterminate';
         statusBox.innerText = '判定不能（通信エラー）';
-        errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)) + '\n権威サーバーへの疎通を確認し、時間をおいて再試行してください。');
+        errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)));
         errorDetailsElement.style.display = 'block';
+        renderNextChecks(['権威サーバーへの疎通を確認し、時間をおいて再試行してください。']);
         renderDiagram(emptyDiagram(domain));
     }
 }
