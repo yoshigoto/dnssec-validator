@@ -26,8 +26,6 @@
             button { width: 100%; }
         }
 
-        .explanation-title { display: none; }
-        .explanation-box { display: none; }
         .result-status-box { padding: 13px 16px; border-radius: 7px; font: bold 16px sans-serif; margin: 20px 0; display: none; border-left: 5px solid; }
         .status-loading { background: #eff6ff; color: #1d4ed8; border-color: var(--blue); }
         .status-success { background: #ecfdf3; color: var(--good); border-color: var(--good); }
@@ -87,7 +85,6 @@
         .child-rrsig { grid-column: 1; grid-row: 7; margin-bottom: 10px; }
         .child-a-record-validation { grid-column: 1; grid-row: 8; margin-bottom: 10px; }
         .chain-arrow { grid-column: 1; grid-row: 5; }
-        .signature-arrow { grid-column: 2; grid-row: 4; }
         .legend { margin-top: 16px; color: var(--muted); font: 12px sans-serif; }
         .footer { max-width: 1200px; margin: 18px auto 0; color: var(--muted); font: 12px/1.6 sans-serif; text-align: center; }
         .footer a { color: inherit; }
@@ -118,15 +115,6 @@
                 </div>
             </div>
         </form>
-
-        <div id="explanationTitle" class="explanation-title">説明</div>
-        <div id="explanationBox" class="explanation-box">
-            <a href="https://jprs.jp/glossary/index.php?ID=0158">フルサービスリゾルバー</a>のように、入力された
-            <a href="https://jprs.jp/glossary/index.php?ID=0083">ドメイン名</a>に関する親 (上位) の
-            <a href="https://jprs.jp/glossary/index.php?ID=0145">権威サーバー</a>を
-            <a href="https://jprs.jp/glossary/index.php?ID=0148">ルート</a>から辿って探し出し、
-            <a href="https://jprs.jp/glossary/index.php?ID=0213">DS レコード</a>を取得して、当該ドメイン名の権威サーバーが持つ DNSKEY と照合します。
-        </div>
 
         <div id="statusBox" class="result-status-box"></div>
         <div id="validation-error-details" class="validation-error-details" role="alert"></div>

@@ -242,10 +242,10 @@ function renderNextChecks(checks) {
     const items = (checks || []).filter(Boolean);
     if (items.length === 0) {
         nextChecksBox.style.display = 'none';
-        nextChecksList.innerHTML = '';
+        nextChecksList.replaceChildren();
         return;
     }
-    nextChecksList.innerHTML = '';
+    nextChecksList.replaceChildren();
     for (const item of items) {
         const li = document.createElement('li');
         li.textContent = sanitizeDisplayText(item);

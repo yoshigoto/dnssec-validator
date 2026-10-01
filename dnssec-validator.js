@@ -515,14 +515,13 @@ function verifyMLDSASignature(publicKeyBuffer, signatureBuffer, messageBuffer, a
 // --- ヘルパー関数: ドメイン名を DNSワイヤーフォーマットに変換 (正規化・非圧縮) ---
 function encodeDomainNameCanonical(domain) {
     const labels = domain.replace(/\.$/, '').toLowerCase().split('.');
-    let buf = Buffer.alloc(0);
+    const chunks = [];
     for (const label of labels) {
         if (!label) continue;
-        const lenBuf = Buffer.from([label.length]);
-        const labelBuf = Buffer.from(label, 'ascii');
-        buf = Buffer.concat([buf, lenBuf, labelBuf]);
+        chunks.push(Buffer.from([label.length]), Buffer.from(label, 'ascii'));
     }
-    return Buffer.concat([buf, Buffer.from([0x00])]);
+    chunks.push(Buffer.from([0x00]));
+    return Buffer.concat(chunks);
 }
 
 // --- ヘルパー関数: DNSKEYレコードから公開鍵バイト列を取得 ---
@@ -905,13 +904,10 @@ function verifyDnskeyWithDs(domain, dnskeyData, dsRecord) {
     const ac = calculateKeyTag(dnskeyData.algorithm, fullRdata);
 
     // 4. ハッシュの計算 (Name + RDATA)
-    const hashInput = Buffer.concat([nameBuf, fullRdata]);
-    const calculatedDigest = crypto.createHash(algoName).update(hashInput).digest('hex').toLowerCase();
+    const calculatedDigest = crypto.createHash(algoName).update(nameBuf).update(fullRdata).digest('hex').toLowerCase();
     const targetDigest = dsRecord.digest.toString('hex').toLowerCase();
 
     // 5. 突合チェック
-    const isKsk = dnskeyData.flags === 257 ? "KSK" : "ZSK";
-
     if (ac === dsRecord.keyTag) {
         if (calculatedDigest === targetDigest) {
             let warnings = [];
@@ -1276,6 +1272,13 @@ app.post('/api/validate', async (req, res) => {
 
     // ドメイン名を正規化
     domain = normalizeDomainName(domain);
+
+    const validationDependencies = req.app.locals.dnssecValidationDependencies || {};
+    const discoverZoneApex = validationDependencies.getZoneApex || getZoneApex;
+    const resolveNameserverAddress = validationDependencies.getARecord || getARecord;
+    const fetchResourceRecord = validationDependencies.getResourceRecord || getResourceRecord;
+    const compareAuthorityRecords = validationDependencies.compareAuthorityRecordSets || compareAuthorityRecordSets;
+    const diagnoseDsProposal = validationDependencies.diagnoseDsProposals || diagnoseDsProposals;
     
     let logs = [];
     let success = false;
@@ -1298,7 +1301,7 @@ app.post('/api/validate', async (req, res) => {
 
     try {
         // 1. ドメイン名からゾーン頂点を取得
-        const zoneApexInfo = await getZoneApex(domain);
+        const zoneApexInfo = await discoverZoneApex(domain);
         if (zoneApexInfo.zoneApex === '') {
             if (zoneApexInfo.hasCnameOrDname) {
                 return sendJson(200, { success: false, logs: [...logs, 'このドメイン名は CNAME/DNAME のためゾーン頂点を特定できませんでした。'], diagram });
@@ -1318,10 +1321,10 @@ app.post('/api/validate', async (req, res) => {
             : [zoneApexInfo.currentNs];
         const comparisonOptions = { dnsResponseCache: dnssecResponseCache };
         const [parentNsComparison, parentDsComparison, childNsComparison, childDnskeyComparison] = await Promise.all([
-            compareAuthorityRecordSets(zoneApexInfo.zoneApex, parentAuthorityNames, 'NS', comparisonOptions),
-            compareAuthorityRecordSets(zoneApexInfo.zoneApex, parentAuthorityNames, 'DS', comparisonOptions),
-            compareAuthorityRecordSets(zoneApexInfo.zoneApex, childAuthorityNames, 'NS', comparisonOptions),
-            compareAuthorityRecordSets(zoneApexInfo.zoneApex, childAuthorityNames, 'DNSKEY', comparisonOptions)
+            compareAuthorityRecords(zoneApexInfo.zoneApex, parentAuthorityNames, 'NS', comparisonOptions),
+            compareAuthorityRecords(zoneApexInfo.zoneApex, parentAuthorityNames, 'DS', comparisonOptions),
+            compareAuthorityRecords(zoneApexInfo.zoneApex, childAuthorityNames, 'NS', comparisonOptions),
+            compareAuthorityRecords(zoneApexInfo.zoneApex, childAuthorityNames, 'DNSKEY', comparisonOptions)
         ]);
         diagram.authorityChecks = {
             parent: { nameservers: parentNsComparison, ds: parentDsComparison },
@@ -1342,8 +1345,8 @@ app.post('/api/validate', async (req, res) => {
         
         try {
             if (targetNs) {
-                parentIp = await getARecord(targetNs);
-                dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+                parentIp = await resolveNameserverAddress(targetNs);
+                dsInfo = await fetchResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
                 parentDsInfo = dsInfo;
                 parentDsIp = parentIp;
             }
@@ -1355,8 +1358,8 @@ app.post('/api/validate', async (req, res) => {
         let childIp = '';
         if (parentDsInfo) {
             try {
-                childIp = await getARecord(zoneApexInfo.currentNs);
-                diagram.dsProposal = await diagnoseDsProposals(zoneApexInfo.zoneApex, parentDsInfo, childIp);
+                childIp = await resolveNameserverAddress(zoneApexInfo.currentNs);
+                diagram.dsProposal = await diagnoseDsProposal(zoneApexInfo.zoneApex, parentDsInfo, childIp);
             } catch (err) {
                 diagram.dsProposal = { parentDs: [], cds: null, cdnskey: null, notes: [`子ゾーンの提案を取得できませんでした: ${err.message}`] };
             }
@@ -1368,8 +1371,8 @@ app.post('/api/validate', async (req, res) => {
             try {
                 targetNs = zoneApexInfo.currentNs;
                 diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
-                parentIp = await getARecord(targetNs);
-                dsInfo = await getResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+                parentIp = await resolveNameserverAddress(targetNs);
+                dsInfo = await fetchResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
             } catch (err) {
                 logs.push(`現在のサーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
                 parentIp = '';
@@ -1403,7 +1406,7 @@ app.post('/api/validate', async (req, res) => {
                                 continue;
                             }
                             try {
-                                const parentDnskeyInfo = await getResourceRecord(signerName, parentDsIp, 'DNSKEY');
+                                const parentDnskeyInfo = await fetchResourceRecord(signerName, parentDsIp, 'DNSKEY');
                                 const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
                                 diagram.parent.dnskey = parentDnskeyRecords.map(key => ({
                                     keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1462,7 +1465,7 @@ app.post('/api/validate', async (req, res) => {
                 const signerName = rrsig.data.signersName || zoneApexInfo.zoneApex;
                 let rrsigVerified = false;
                 try {
-                    const parentDnskeyInfo = await getResourceRecord(signerName, parentIp, 'DNSKEY');
+                    const parentDnskeyInfo = await fetchResourceRecord(signerName, parentIp, 'DNSKEY');
                     const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
                     diagram.parent.dnskey = parentDnskeyRecords.map(key => ({
                         keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1499,7 +1502,7 @@ app.post('/api/validate', async (req, res) => {
 
         // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得
         try {
-            childIp = childIp || await getARecord(zoneApexInfo.currentNs);
+            childIp = childIp || await resolveNameserverAddress(zoneApexInfo.currentNs);
         } catch (err) {
             return sendJson(200, { success: false, logs: [...logs, `子サーバー [${zoneApexInfo.currentNs}] の IP アドレス取得失敗: ${err.message}`], diagram });
         }
@@ -1509,7 +1512,7 @@ app.post('/api/validate', async (req, res) => {
         
         let dnskeyInfo = null;
         try {
-            dnskeyInfo = await getResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
+            dnskeyInfo = await fetchResourceRecord(zoneApexInfo.zoneApex, childIp, 'DNSKEY');
         } catch (err) {
             return sendJson(200, { success: false, logs: [...logs, `子サーバーからDNSKEYレコード取得失敗: ${err.message}`], diagram });
         }
@@ -1605,7 +1608,7 @@ app.post('/api/validate', async (req, res) => {
                         }
                     }
                 }
-                const aInfo = await getResourceRecord(domain, childIp, recordType);
+                const aInfo = await fetchResourceRecord(domain, childIp, recordType);
                 aRecordValidation.recordsFound = aInfo.resourceRecords.length > 0;
                 for (const rrsig of aInfo.rrsigRecords) {
                     let verified = false;
@@ -1725,6 +1728,7 @@ export {
     compareAuthorityRecordSets,
     diagnoseDsProposals,
     verifyDnskeyWithDs,
+    verifyRecordRrsig,
     isZoneSigningKey,
     calculateKeyTag,
     buildDnskeyFullRdata,

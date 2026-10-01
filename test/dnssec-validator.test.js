@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
 import dnsPacket from 'dns-packet';
+import { ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
 
 import {
     app,
@@ -17,6 +18,7 @@ import {
     compareAuthorityRecordSets,
     diagnoseDsProposals,
     verifyDnskeyWithDs,
+    verifyRecordRrsig,
     isZoneSigningKey,
     calculateKeyTag,
     buildDnskeyFullRdata,
@@ -78,6 +80,101 @@ function makeDsForDnskey(domain, dnskeyData) {
     };
 }
 
+function makeSigningKey(algorithm, flags = 256) {
+    let key;
+    let sign;
+    if ([5, 7, 8, 10].includes(algorithm)) {
+        const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 });
+        const jwk = pair.publicKey.export({ format: 'jwk' });
+        const exponent = Buffer.from(jwk.e, 'base64url');
+        const modulus = Buffer.from(jwk.n, 'base64url');
+        const exponentLength = exponent.length < 256
+            ? Buffer.from([exponent.length])
+            : Buffer.from([0, exponent.length >> 8, exponent.length & 0xff]);
+        key = Buffer.concat([exponentLength, exponent, modulus]);
+        const hash = { 5: 'sha1', 7: 'sha1', 8: 'sha256', 10: 'sha512' }[algorithm];
+        sign = message => crypto.sign(hash, message, pair.privateKey);
+    } else if ([13, 14].includes(algorithm)) {
+        const namedCurve = algorithm === 13 ? 'prime256v1' : 'secp384r1';
+        const pair = crypto.generateKeyPairSync('ec', { namedCurve });
+        const jwk = pair.publicKey.export({ format: 'jwk' });
+        key = Buffer.concat([Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
+        const hash = algorithm === 13 ? 'sha256' : 'sha384';
+        sign = message => crypto.sign(hash, message, { key: pair.privateKey, dsaEncoding: 'ieee-p1363' });
+    } else if ([15, 16].includes(algorithm)) {
+        const pair = crypto.generateKeyPairSync(algorithm === 15 ? 'ed25519' : 'ed448');
+        key = Buffer.from(pair.publicKey.export({ format: 'jwk' }).x, 'base64url');
+        sign = message => crypto.sign(null, message, pair.privateKey);
+    } else if (algorithm === 18) {
+        const pair = ml_dsa44.keygen(new Uint8Array(ml_dsa44.lengths.seed));
+        key = Buffer.from(pair.publicKey);
+        sign = message => Buffer.from(ml_dsa44.sign(message, pair.secretKey));
+    } else {
+        throw new Error(`Unsupported test algorithm: ${algorithm}`);
+    }
+
+    return { data: { flags, protocol: 3, algorithm, key }, sign };
+}
+
+function encodeTestDnsName(name) {
+    const chunks = [];
+    for (const label of name.replace(/\.$/, '').toLowerCase().split('.')) {
+        chunks.push(Buffer.from([label.length]), Buffer.from(label, 'ascii'));
+    }
+    chunks.push(Buffer.from([0]));
+    return Buffer.concat(chunks);
+}
+
+function encodeTestRdata(type, data) {
+    if (type === 'A') return Buffer.from(data.split('.').map(Number));
+    if (type === 'DNSKEY') return buildDnskeyFullRdata(data);
+    if (type === 'DS') {
+        const rdata = Buffer.alloc(4 + data.digest.length);
+        rdata.writeUInt16BE(data.keyTag, 0);
+        rdata.writeUInt8(data.algorithm, 2);
+        rdata.writeUInt8(data.digestType, 3);
+        Buffer.from(data.digest).copy(rdata, 4);
+        return rdata;
+    }
+    throw new Error(`Unsupported test RR type: ${type}`);
+}
+
+function makeSignedRrsig(owner, signerName, type, records, signingKey) {
+    const typeCode = { A: 1, DS: 43, DNSKEY: 48 }[type];
+    const fullKeyRdata = buildDnskeyFullRdata(signingKey.data);
+    const now = Math.floor(Date.now() / 1000);
+    const data = {
+        typeCovered: type,
+        algorithm: signingKey.data.algorithm,
+        labels: owner.split('.').length,
+        originalTTL: 300,
+        expiration: now + 3600,
+        inception: now - 60,
+        keyTag: calculateKeyTag(signingKey.data.algorithm, fullKeyRdata),
+        signersName: signerName
+    };
+    const signatureHeader = Buffer.alloc(18);
+    signatureHeader.writeUInt16BE(typeCode, 0);
+    signatureHeader.writeUInt8(data.algorithm, 2);
+    signatureHeader.writeUInt8(data.labels, 3);
+    signatureHeader.writeUInt32BE(data.originalTTL, 4);
+    signatureHeader.writeUInt32BE(data.expiration, 8);
+    signatureHeader.writeUInt32BE(data.inception, 12);
+    signatureHeader.writeUInt16BE(data.keyTag, 16);
+
+    const ownerName = encodeTestDnsName(owner);
+    const rrsetWire = records.map(record => encodeTestRdata(type, record.data)).sort(Buffer.compare).map(rdata => {
+        const rrHeader = Buffer.alloc(10);
+        rrHeader.writeUInt16BE(typeCode, 0);
+        rrHeader.writeUInt16BE(1, 2);
+        rrHeader.writeUInt32BE(data.originalTTL, 4);
+        rrHeader.writeUInt16BE(rdata.length, 8);
+        return Buffer.concat([ownerName, rrHeader, rdata]);
+    });
+    const signedData = Buffer.concat([signatureHeader, encodeTestDnsName(signerName), ...rrsetWire]);
+    return { name: owner, type: 'RRSIG', data: { ...data, signature: signingKey.sign(signedData) } };
+}
+
 test('ドメイン名を検証する', () => {
     assert.deepEqual(validateDomainName('Example.COM.'), { valid: true });
     assert.equal(validateDomainName('example.com;').valid, false);
@@ -88,6 +185,10 @@ test('ドメイン名を検証する', () => {
 
 test('ドメイン名を正規化する', () => {
     assert.equal(normalizeDomainName('WWW.Example.COM.'), 'www.example.com');
+});
+
+test('ドメイン名を正規化されたDNSワイヤ形式へ変換する', () => {
+    assert.deepEqual(encodeDomainNameCanonical('WWW.Example.COM.'), Buffer.from([3, ...Buffer.from('www'), 7, ...Buffer.from('example'), 3, ...Buffer.from('com'), 0]));
 });
 
 test('クライアントごとのレート制限を適用する', () => {
@@ -109,6 +210,19 @@ test('DS と DNSKEY のダイジェストが一致する', () => {
 
     assert.equal(result.match, true);
     assert.equal(result.keyTag, dsRecord.keyTag);
+});
+
+test('固定DNSKEYベクトルからRFC形式のDSダイジェストを検証する', () => {
+    const dnskeyData = { flags: 257, algorithm: 8, key: Buffer.from([1, 2, 3, 4]) };
+    const result = verifyDnskeyWithDs('example.test', dnskeyData, {
+        keyTag: 2063,
+        algorithm: 8,
+        digestType: 2,
+        digest: Buffer.from('5647d64734bc6a8a06333a98e849a610960130e985c3814c5b65eb30e9136f4f', 'hex')
+    });
+
+    assert.equal(result.match, true);
+    assert.equal(result.keyTag, 2063);
 });
 
 test('DS のダイジェスト不一致を検出する', () => {
@@ -158,6 +272,20 @@ test('RRSIG の未開始・期限切れを検出する', () => {
     assert.match(notStarted.reason, /まだ有効になっていません/);
     assert.equal(expired.valid, false);
     assert.match(expired.reason, /期限が切れています/);
+});
+
+test('対応する各DNSSEC署名アルゴリズムでRRSIGを検証し、改ざんを拒否する', () => {
+    const domain = 'example.test';
+    const records = [{ name: domain, type: 'A', data: '192.0.2.44' }];
+    for (const algorithm of [5, 7, 8, 10, 13, 14, 15, 16, 18]) {
+        const signingKey = makeSigningKey(algorithm);
+        const dnskeyRecord = { name: domain, type: 'DNSKEY', data: signingKey.data };
+        const signature = makeSignedRrsig(domain, domain, 'A', records, signingKey);
+        assert.equal(verifyRecordRrsig(records, signature, dnskeyRecord, domain).verified, true, `algorithm ${algorithm}`);
+
+        signature.data.signature[0] ^= 1;
+        assert.equal(verifyRecordRrsig(records, signature, dnskeyRecord, domain).verified, false, `algorithm ${algorithm}`);
+    }
 });
 
 test('ゾーン頂点でもAレコードDNSSEC検証を開始する', () => {
@@ -441,6 +569,23 @@ test('権威 SOA 応答からゾーン頂点を確定する', async () => {
     assert.equal(result.zoneApex, 'example.test');
     assert.equal(result.parentNs, '');
     assert.equal(result.currentNs, '192.0.2.1');
+});
+
+test('初期ネームサーバー未指定時はルートブートストラップIPから探索する', async () => {
+    let queriedServerIp;
+    const result = await getZoneApex('example.test', {
+        queryDirectlyUDP: async (domain, serverIp) => {
+            queriedServerIp = serverIp;
+            return {
+                rcode: 'NOERROR',
+                flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                answers: [{ name: 'example.test', type: 'SOA', data: {} }]
+            };
+        }
+    });
+
+    assert.equal(queriedServerIp, ROOT_SERVER_BOOTSTRAP_IP);
+    assert.equal(result.zoneApex, 'example.test');
 });
 
 test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSECリソースレコードを抽出する', async () => {
@@ -739,6 +884,104 @@ test('GET / は UI を返し、セキュリティヘッダーを付ける', asyn
         assert.equal(response.headers['x-frame-options'], 'DENY');
         assert.match(response.body, /DNSSEC委任状態検証ツール/);
     } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('署名付きの親子RRsetをAPI経由で検証し、対象署名の改ざんを拒否する', async () => {
+    const domain = 'child.example.test';
+    const parentZone = 'example.test';
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const parentKey = makeSigningKey(15, 257);
+    const childKsk = makeSigningKey(15, 257);
+    const childZsk = makeSigningKey(15, 256);
+    const parentDnskey = { name: parentZone, type: 'DNSKEY', data: parentKey.data };
+    const childDnskeys = [
+        { name: domain, type: 'DNSKEY', data: childKsk.data },
+        { name: domain, type: 'DNSKEY', data: childZsk.data }
+    ];
+    const dsRecord = { name: domain, type: 'DS', data: makeDsForDnskey(domain, childKsk.data) };
+    const dsSignature = makeSignedRrsig(domain, parentZone, 'DS', [dsRecord], parentKey);
+    const dnskeySignature = makeSignedRrsig(domain, domain, 'DNSKEY', childDnskeys, childKsk);
+    const addressRecord = { name: domain, type: 'A', data: '192.0.2.44' };
+    const addressSignature = makeSignedRrsig(domain, domain, 'A', [addressRecord], childZsk);
+    const queryOptions = response => ({
+        rcode: 'NOERROR',
+        resourceRecords: response,
+        denialRecords: [],
+        denialRrsigRecords: []
+    });
+    let corruptAddressSignature = false;
+    const authorityComparison = recordType => ({
+        recordType,
+        complete: true,
+        consistent: true,
+        hasDifferences: false,
+        servers: []
+    });
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    app.locals.dnssecValidationDependencies = {
+        getZoneApex: async () => ({
+            zoneApex: domain,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') return { ...queryOptions([dsRecord]), rrsigRecords: [dsSignature] };
+            if (recordType === 'DNSKEY' && serverIp === parentIp) return { ...queryOptions([parentDnskey]), rrsigRecords: [] };
+            if (recordType === 'DNSKEY') return { ...queryOptions(childDnskeys), rrsigRecords: [dnskeySignature] };
+            if (recordType === 'A') {
+                const signature = corruptAddressSignature
+                    ? { ...addressSignature, data: { ...addressSignature.data, signature: Buffer.from(addressSignature.data.signature) } }
+                    : addressSignature;
+                if (corruptAddressSignature) signature.data.signature[0] ^= 1;
+                return { ...queryOptions([addressRecord]), rrsigRecords: [signature] };
+            }
+            throw new Error(`Unexpected query ${recordType} for ${queryName}`);
+        },
+        compareAuthorityRecordSets: async (zone, nameservers, recordType) => authorityComparison(recordType),
+        diagnoseDsProposals: async () => ({ parentDs: [], cds: null, cdnskey: null, notes: [] })
+    };
+
+    const server = app.listen(0);
+    try {
+        const firstResponse = await request(server, {
+            method: 'POST',
+            path: '/api/validate',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        const secureResult = JSON.parse(firstResponse.body);
+        assert.equal(firstResponse.statusCode, 200);
+        assert.equal(secureResult.status, 'secure');
+        assert.equal(secureResult.success, true);
+        assert.deepEqual(secureResult.diagram.checks, { dsSignature: true, dnskeySignature: true, dsKeyMatch: true });
+        assert.equal(secureResult.diagram.child.aRecordValidation.signatures[0].trustChainVerified, true);
+
+        corruptAddressSignature = true;
+        const secondResponse = await request(server, {
+            method: 'POST',
+            path: '/api/validate',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        const bogusResult = JSON.parse(secondResponse.body);
+        assert.equal(secondResponse.statusCode, 200);
+        assert.equal(bogusResult.status, 'bogus');
+        assert.equal(bogusResult.success, false);
+        assert.equal(bogusResult.diagram.checks.dsSignature, true);
+        assert.equal(bogusResult.diagram.checks.dnskeySignature, true);
+        assert.equal(bogusResult.diagram.checks.dsKeyMatch, true);
+        assert.equal(bogusResult.diagram.child.aRecordValidation.signatures[0].trustChainVerified, false);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
         await new Promise(resolve => server.close(resolve));
     }
 });
