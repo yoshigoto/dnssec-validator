@@ -588,6 +588,31 @@ test('初期ネームサーバー未指定時はルートブートストラッ�
     assert.equal(result.zoneApex, 'example.test');
 });
 
+test('ルート referral の TLD glue を使って次の権威サーバーへ進む', async () => {
+    const queriedServerIps = [];
+    const result = await getZoneApex('com', {
+        queryDirectlyUDP: async (domain, serverIp) => {
+            queriedServerIps.push(serverIp);
+            if (queriedServerIps.length === 1) {
+                return {
+                    rcode: 'NOERROR',
+                    flags: 0,
+                    authorities: [{ name: 'com', type: 'NS', data: 'a.gtld-servers.net' }],
+                    additionals: [{ name: 'a.gtld-servers.net', type: 'A', data: '192.0.2.53' }]
+                };
+            }
+            return {
+                rcode: 'NOERROR',
+                flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                answers: [{ name: 'com', type: 'SOA', data: {} }]
+            };
+        }
+    });
+
+    assert.deepEqual(queriedServerIps, [ROOT_SERVER_BOOTSTRAP_IP, '192.0.2.53']);
+    assert.equal(result.zoneApex, 'com');
+});
+
 test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSECリソースレコードを抽出する', async () => {
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
         queryDirectlyUDP: async (domain, serverIp, cache, qType, queryOptions) => {
@@ -738,12 +763,14 @@ test('権威サーバー間のDS差分と問い合わせ失敗を報告する', 
     assert.deepEqual(result.servers.map(server => server.status), ['ok', 'ok', 'error']);
 });
 
-test('out-of-bailiwick の参照アドレスを追加セクションから採用する', async () => {
+test('out-of-bailiwick の参照アドレスは使わず NS 名を自己解決する', async () => {
     const requests = [];
+    const resolvedNameservers = [];
     const result = await getZoneApex('www.child.example.test', {
         initialNameserver: '192.0.2.1',
-        resolveHostnameIPv4Self: async () => {
-            throw new Error('参照アドレスの自己解決は不要');
+        resolveHostnameIPv4Self: async hostname => {
+            resolvedNameservers.push(hostname);
+            return '192.0.2.23';
         },
         queryDirectlyUDP: async (domain, serverIp) => {
             requests.push(serverIp);
@@ -762,7 +789,8 @@ test('out-of-bailiwick の参照アドレスを追加セクションから採用
         }
     });
 
-    assert.deepEqual(requests, ['192.0.2.1', '192.0.2.22']);
+    assert.deepEqual(requests, ['192.0.2.1', '192.0.2.23']);
+    assert.deepEqual(resolvedNameservers, ['ns.external.test']);
     assert.equal(result.zoneApex, 'child.example.test');
 });
 

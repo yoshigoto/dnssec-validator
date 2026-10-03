@@ -232,6 +232,7 @@ async function getZoneApex(domain, options = {}) {
     let hasCnameOrDname = false;
 
     for (let i = 0; i < 10; i++) {
+        const isRootNameserver = currentNs === ROOT_NAMESERVER;
         const currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
             queryDirectlyUDP: options.queryDirectlyUDP,
             knownAddresses: options.knownAddresses,
@@ -307,7 +308,14 @@ async function getZoneApex(domain, options = {}) {
                     }
                 }
                 if (!chosenNsRecord) {
-                    const referralAddresses = getReferralAddressRecords(additionals, nsRecords.map(record => normalizeResolverDnsName(record.data)));
+                    const delegationZone = nsRecords[0].name;
+                    const referralAddresses = getReferralAddressRecords(
+                        additionals,
+                        nsRecords.map(record => record.data),
+                        delegationZone,
+                        'strict',
+                        isRootNameserver ? '.' : delegationZone
+                    );
                     const referralA = referralAddresses.find(record => record.type === 'A');
                     if (referralA) {
                         chosenNsRecord = nsRecords.find(record => normalizeResolverDnsName(record.data) === normalizeResolverDnsName(referralA.name));
