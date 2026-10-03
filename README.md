@@ -83,6 +83,20 @@ VS Code では WSL 拡張機能でこのフォルダーを開くと、統合タ�
 
 テスト本体は `test/dnssec-validator.test.js` にあります。実際の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
 
+dnssec-check.jp の掲載ドメインを起動済みの API で一括検証する場合:
+
+```bash
+python3 test/validate_all_domains.py --url http://localhost:3002
+```
+
+HTTP 429 の場合は `Retry-After` の秒数だけ待ち、同じドメインを最大3回再試行します。ヘッダーがない、または秒数形式でない場合は60秒待ちます。`--rate-limit-retries` で回数を変更でき、`0` で再試行を無効にできます。HTTP エラーは DNSSEC の検証失敗とは区別し、テスト不一致として扱います。`--url` を省略するとドメインごとに独立した Node プロセスを起動するため、レート制限の状態は共有されません。
+
+一括検証スクリプトの待機・再試行のテストは、外部通信なしで実行できます。
+
+```bash
+python3 -m unittest discover -s test -p 'test_validate_all_domains.py'
+```
+
 ## API
 
 画面からの検証処理は、次のエンドポイントを使用します。
@@ -139,7 +153,7 @@ Secure と判定された場合のレスポンス例です。すべての検証�
 `diagram.authorityChecks` には、親・子の各権威サーバーが返した NS / DS / DNSKEY の比較結果が含まれます。応答が得られないサーバーは、RRset の不一致とは区別して記録されます。
 `diagram.dsProposal` には、親のDSと子のCDS / CDNSKEYが提案するDSの比較結果が含まれます。`diagram.dsProposal.cds.status` と `diagram.dsProposal.cdnskey.status` は `match`、`different`、`delete`、`absent`、`error` のいずれかです。
 
-入力不備の場合は `400`、レート制限超過時は `429`、サーバー内部エラー時は `500` を返します。
+入力不備の場合は `400`、レート制限超過時は `429`、サーバー内部エラー時は `500` を返します。`429` 応答には、再試行までの待機秒数を示す `Retry-After` ヘッダーが含まれます。
 
 ## 検証方式
 
@@ -152,7 +166,7 @@ Secure と判定された場合のレスポンス例です。すべての検証�
 - EdDSA: ED25519、ED448
 - ML-DSA: ML-DSA-44
 
-ネームサーバーの IP アドレスは `dns-self-resolver` の TTL 付きプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 30 回のレート制限があります。
+ネームサーバーの IP アドレスは `dns-self-resolver` の TTL 付きプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 60 回のレート制限があります。最初のリクエストから60秒でリセットされ、全ドメインの一括検証後すぐに再実行すると制限に達する場合があります。接続元 IP に基づくため、同一ホストの nginx 経由の利用は同じ枠を共有します。
 
 ## ファイル構成
 

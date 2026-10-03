@@ -37,7 +37,7 @@ app.use((req, res, next) => {
 const ROOT_NAMESERVER = ROOT_SERVER_BOOTSTRAP_IP;
 const dnssecResponseCache = new Map();
 const MAX_DOMAIN_LENGTH = 253;
-const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
+const RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
 const rateLimitMap = new Map(); // IP: { count, resetTime }
 const API_VALIDATE_TIMEOUT_MS = 25000; // ホスティング基盤側のゲートウェイタイムアウト(HTMLエラーページ化)より先に必ずJSONで応答するための上限
 const VALIDATION_RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'CAA', 'SRV'];
@@ -95,7 +95,7 @@ function checkRateLimit(clientIp) {
     }
     
     const record = rateLimitMap.get(clientIp);
-    if (now > record.resetTime) {
+    if (now >= record.resetTime) {
         // リセット
         rateLimitMap.set(clientIp, { count: 1, resetTime: now + 60000 });
         return { allowed: true, remaining: RATE_LIMIT_REQUESTS_PER_MINUTE - 1 };
@@ -1273,6 +1273,7 @@ app.post('/api/validate', async (req, res) => {
     // レート制限チェック
     const rateLimit = checkRateLimit(clientIp);
     if (!rateLimit.allowed) {
+        res.set('Retry-After', String(rateLimit.waitSeconds));
         return res.status(429).json({ 
             error: `リクエスト制限に達しました。${rateLimit.waitSeconds}秒後に再度お試しください。` 
         });

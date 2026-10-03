@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 
@@ -191,15 +192,19 @@ test('ドメイン名を正規化されたDNSワイヤ形式へ変換する', ()
     assert.deepEqual(encodeDomainNameCanonical('WWW.Example.COM.'), Buffer.from([3, ...Buffer.from('www'), 7, ...Buffer.from('example'), 3, ...Buffer.from('com'), 0]));
 });
 
-test('クライアントごとのレート制限を適用する', () => {
+test('クライアントごとに60回を許可し、61回目を制限して60秒後にリセットする', t => {
+    let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
     const clientIp = `test-${Date.now()}-${Math.random()}`;
-    for (let requestNumber = 0; requestNumber < 30; requestNumber++) {
-        assert.equal(checkRateLimit(clientIp).allowed, true);
+    for (let requestNumber = 0; requestNumber < 60; requestNumber++) {
+        assert.deepEqual(checkRateLimit(clientIp), { allowed: true, remaining: 59 - requestNumber });
     }
-    const limited = checkRateLimit(clientIp);
-    assert.equal(limited.allowed, false);
-    assert.equal(limited.remaining, 0);
-    assert.ok(limited.waitSeconds > 0);
+    assert.deepEqual(checkRateLimit(clientIp), { allowed: false, remaining: 0, waitSeconds: 60 });
+    assert.equal(checkRateLimit(`${clientIp}-other`).allowed, true);
+    now += 17000;
+    assert.deepEqual(checkRateLimit(clientIp), { allowed: false, remaining: 0, waitSeconds: 43 });
+    now += 43000;
+    assert.deepEqual(checkRateLimit(clientIp), { allowed: true, remaining: 59 });
 });
 
 test('DS と DNSKEY のダイジェストが一致する', () => {
@@ -1058,6 +1063,45 @@ test('不正な JSON は 400 を返す', async () => {
         assert.equal(response.statusCode, 400);
         assert.equal(JSON.parse(response.body).error, 'JSONリクエストの形式が無効です');
     } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('POST /api/validate は60回を許可し、429にRetry-Afterを付ける', async t => {
+    let now = Date.now() + 60000;
+    t.mock.method(Date, 'now', () => now);
+    let validations = 0;
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    app.locals.dnssecValidationDependencies = {
+        getZoneApex: async () => {
+            validations++;
+            return { zoneApex: '', hasCnameOrDname: true };
+        }
+    };
+    const server = app.listen(0, '127.0.0.1');
+    const options = {
+        method: 'POST',
+        path: '/api/validate',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'example.test' })
+    };
+    try {
+        await once(server, 'listening');
+        for (let count = 0; count < 60; count++) {
+            assert.equal((await request(server, options)).statusCode, 200);
+        }
+        now += 17000;
+        const response = await request(server, options);
+        assert.equal(response.statusCode, 429);
+        assert.equal(response.headers['retry-after'], '43');
+        assert.match(JSON.parse(response.body).error, /43秒後/);
+        assert.equal(validations, 60);
+        now += 43000;
+        assert.equal((await request(server, options)).statusCode, 200);
+        assert.equal(validations, 61);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
         await new Promise(resolve => server.close(resolve));
     }
 });

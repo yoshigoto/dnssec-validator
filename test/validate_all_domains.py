@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 """
-dnssec-check.jp の掲載ドメイン全56件をローカルの DNSSEC バリデータ API に対し一括検証するテストスクリプト。
+dnssec-check.jp の掲載ドメイン全56件をローカルまたは公開サーバーの DNSSEC バリデータ API に対し一括検証するテストスクリプト。
 
 使い方:
     python3 test/validate_all_domains.py
     python3 test/validate_all_domains.py --url http://localhost:3002
+    python3 test/validate_all_domains.py --url https://www.example.jp/dnssec-validator/
+
+--url オプションを指定する場合:
+    指定したベース URL で起動済みの、このプロジェクトの DNSSEC バリデータ
+    (dnssec-validator.js) に接続し、POST /api/validate で各ドメインを検証します。
+    接続先はローカルサーバーに限らず、HTTP/HTTPS でアクセス可能な公開サーバーも
+    指定できます。ベース URL の末尾に /api/validate を追加するため、公開 URL が
+    https://www.example.jp/dnssec-validator/ の場合、リクエスト先は
+    https://www.example.jp/dnssec-validator/api/validate になります。
+    サーバー側で、このパスがバリデータ API に転送される構成が必要です。
+    なお、--url http://localhost:3002 とする場合は、別のターミナルで先に
+    npm start を実行してください。しかし、起動済みの公開サーバーを使う場合は、
+    ローカルでの npm start は不要です。
+    同じサーバーに連続してリクエストするため、API のレート制限が適用されます。
+    HTTP 429 の場合は Retry-After の秒数だけ待ち、既定で最大3回再試行します。
+
+--url オプションを省略する場合:
+    ドメインごとに独立した Node プロセスで dnssec-validator.js のアプリを読み込み、
+    一時的なローカルサーバーを起動して検証後に終了します。
+    npm start による事前起動は不要で、レート制限の状態もドメイン間で共有されません。
 """
 
 import argparse
@@ -14,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 
@@ -78,7 +99,20 @@ def fetch_published_domains():
         "target.type.mismatch.nsec3.rsasha256.dnssec-check.jp"
     ]
 
-def validate_domain(target_url, domain, timeout=30):
+def validate_domain(target_url, domain, timeout=30, rate_limit_retries=3):
+    """429 の場合は Retry-After の秒数だけ待ち、回数を制限して再試行する"""
+    started = time.monotonic()
+    for attempt in range(rate_limit_retries + 1):
+        result = validate_domain_once(target_url, domain, timeout)
+        if result["status"] != 429 or attempt == rate_limit_retries:
+            result["elapsed"] = int((time.monotonic() - started) * 1000)
+            return result
+        retry_after = result.get("retry_after", "")
+        wait_seconds = max(1, int(retry_after)) if retry_after.isascii() and retry_after.isdigit() else 60
+        print(f"  -> {domain}: HTTP 429 ({result['error']})。{wait_seconds}秒待機して再試行します ({attempt + 1}/{rate_limit_retries})。")
+        time.sleep(wait_seconds)
+
+def validate_domain_once(target_url, domain, timeout=30):
     """単一のドメインに対して POST /api/validate を実行する"""
     endpoint = target_url.rstrip('/') + '/api/validate'
     payload = json.dumps({"domain": domain}).encode('utf-8')
@@ -102,7 +136,7 @@ def validate_domain(target_url, domain, timeout=30):
         elapsed = int((time.time() - t0) * 1000)
         try:
             data = json.loads(e.read().decode('utf-8'))
-            return {
+            result = {
                 "status": e.code,
                 "success": data.get("success", False),
                 "error": data.get("error"),
@@ -110,7 +144,10 @@ def validate_domain(target_url, domain, timeout=30):
                 "elapsed": elapsed
             }
         except Exception:
-            return {"status": e.code, "success": False, "error": str(e), "logs": [], "elapsed": elapsed}
+            result = {"status": e.code, "success": False, "error": str(e), "logs": [], "elapsed": elapsed}
+        if e.code == 429:
+            result["retry_after"] = e.headers.get("Retry-After", "").strip()
+        return result
     except Exception as e:
         elapsed = int((time.time() - t0) * 1000)
         return {"status": 500, "success": False, "error": str(e), "logs": [], "elapsed": elapsed}
@@ -165,9 +202,12 @@ const server = app.listen(0, '127.0.0.1', async () => {{
 
 def main():
     parser = argparse.ArgumentParser(description="dnssec-check.jp 掲載ドメイン一括検証テストスクリプト")
-    parser.add_argument("--url", help="対象 API のベース URL (指定がある場合は既存サーバーに直接クエリ)")
+    parser.add_argument("--url", help="事前に起動した DNSSEC バリデータのベース URL (例: http://localhost:3002)。省略時はドメインごとに一時サーバーを起動")
     parser.add_argument("--timeout", type=int, default=30, help="各ドメイン検証のタイムアウト (秒)")
+    parser.add_argument("--rate-limit-retries", type=int, default=3, help="HTTP 429 時の最大再試行回数 (既定: 3、0 で無効)")
     args = parser.parse_args()
+    if args.rate_limit_retries < 0:
+        parser.error("--rate-limit-retries は 0 以上を指定してください")
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     domains = fetch_published_domains()
@@ -181,12 +221,12 @@ def main():
         expected_success = domain.startswith("success.") or domain.startswith("www.success.")
         
         if args.url:
-            res = validate_domain(args.url, domain, timeout=args.timeout)
+            res = validate_domain(args.url, domain, timeout=args.timeout, rate_limit_retries=args.rate_limit_retries)
         else:
             res = run_isolated_validation(domain, project_root, timeout=args.timeout)
             
         actual_success = res["success"]
-        is_match = (actual_success == expected_success)
+        is_match = res["status"] == 200 and not res["error"] and actual_success == expected_success
         
         results.append({
             "domain": domain,
