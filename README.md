@@ -111,9 +111,12 @@ Content-Type: application/json
 
 ```json
 {
-  "domain": "example.com"
+  "domain": "example.com",
+  "recordType": "AAAA"
 }
 ```
+
+`recordType` は任意です。省略時は `A` を検証し、指定する場合は `A`、`AAAA`、`CNAME`、`MX`、`NS`、`TXT`、`CAA`、`SRV` のいずれかを指定します。
 
 Secure と判定された場合のレスポンス例です。すべての検証結果に、状態を示す `status`、表示用の `statusLabel`、次の確認箇所を示す `nextChecks` が含まれます。
 
@@ -166,7 +169,7 @@ Secure と判定された場合のレスポンス例です。すべての検証�
 - EdDSA: ED25519、ED448
 - ML-DSA: ML-DSA-44
 
-ネームサーバーの IP アドレスは `dns-self-resolver` の TTL 付きプロセス内キャッシュに保存されます。API には、1 クライアント IP あたり 1 分 60 回のレート制限があります。最初のリクエストから60秒でリセットされ、全ドメインの一括検証後すぐに再実行すると制限に達する場合があります。接続元 IP に基づくため、同一ホストの nginx 経由の利用は同じ枠を共有します。
+ネームサーバーの IP アドレスは `dns-self-resolver` の TTL 付きプロセス内キャッシュに保存されます。API には、サーバーが認識する接続元 IP あたり 1 分 60 回のレート制限があります。最初のリクエストから60秒でリセットされ、全ドメインの一括検証後すぐに再実行すると制限に達する場合があります。nginx 経由の場合は通常、nginx の接続元 IP が使われるため、その経由でアクセスするクライアント全体で同じ枠を共有します。
 
 ## ファイル構成
 
@@ -183,6 +186,7 @@ Secure と判定された場合のレスポンス例です。すべての検証�
 - [Express](https://expressjs.com/): Web サーバーと API
 - [dns-packet](https://github.com/mafintosh/dns-packet): DNS パケットのエンコード / デコード
 - [dns-self-resolver](https://github.com/yoshigoto/dns-self-resolver): DNS 問い合わせ、ネームサーバー名の自己解決、グルー判定
+- [@noble/post-quantum](https://github.com/paulmillr/noble-post-quantum): ML-DSA-44 署名の検証
 
 ## 注意事項
 
