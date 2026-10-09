@@ -1560,6 +1560,10 @@ app.post('/api/validate', async (req, res) => {
             }
         }
 
+        if (zoneApexInfo.discoveryError) {
+            return sendJson(200, { success: false, logs: [...logs, 'ゾーン頂点の探索が完了していないため、DNSKEY以降の検証は続行できません。'], diagram });
+        }
+
         // 3. 子ゾーンの権威サーバーを自動検出して DNSKEY を取得
         try {
             childIp = childIp || await resolveNameserverAddress(zoneApexInfo.currentNs);

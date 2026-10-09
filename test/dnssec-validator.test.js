@@ -1086,6 +1086,7 @@ test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out
     const previousDependencies = app.locals.dnssecValidationDependencies;
     let dsResponse;
     let dnskeyError = false;
+    let dnskeyQueries = 0;
     app.locals.dnssecValidationDependencies = {
         getZoneApex: name => getZoneApex(name, {
             initialNameserver: '192.0.2.1',
@@ -1109,6 +1110,7 @@ test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out
                 assert.equal(name, domain);
                 return dsResponse;
             }
+            dnskeyQueries++;
             assert.equal(type, 'DNSKEY');
             assert.equal(name, parentZone);
             if (dnskeyError) throw new Error('DNSKEY timeout');
@@ -1122,7 +1124,7 @@ test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out
     };
     const server = app.listen(0);
     try {
-        for (const scenario of ['mismatch', 'valid', 'unsigned-proof', 'bad-signature', 'dnskey-error', 'no-proof', 'servfail']) {
+        for (const scenario of ['mismatch', 'valid', 'unsigned-proof', 'bad-signature', 'dnskey-error', 'no-proof', 'servfail', 'ds-present']) {
             const record = {
                 name: `${'0'.repeat(32)}.${parentZone}`, type: 'NSEC3',
                 data: {
@@ -1136,10 +1138,16 @@ test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out
             dnskeyError = scenario === 'dnskey-error';
             dsResponse = {
                 rcode: scenario === 'servfail' ? 'SERVFAIL' : 'NOERROR',
-                resourceRecords: [],
+                resourceRecords: scenario === 'ds-present' ? [{
+                    name: domain,
+                    type: 'DS',
+                    data: { keyTag: 1234, algorithm: 8, digestType: 2, digest: Buffer.alloc(32, 1) }
+                }] : [],
                 denialRecords: scenario === 'no-proof' ? [] : [record],
-                denialRrsigRecords: scenario === 'unsigned-proof' ? [] : [signature]
+                denialRrsigRecords: scenario === 'unsigned-proof' ? [] : [signature],
+                rrsigRecords: []
             };
+            dnskeyQueries = 0;
             const response = await request(server, {
                 method: 'POST', path: '/api/validate',
                 headers: { 'Content-Type': 'application/json' },
@@ -1151,8 +1159,12 @@ test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out
             assert.equal(result.status, expected, scenario);
             assert.equal(result.success, false, scenario);
             assert.equal(result.diagram.child.name, domain, scenario);
-            assert.equal(result.diagram.parent.dsAbsenceProof.verified, scenario === 'valid', scenario);
+            if (scenario !== 'ds-present') assert.equal(result.diagram.parent.dsAbsenceProof.verified, scenario === 'valid', scenario);
             assert.match(result.logs.join('\n'), /referral.*繰り返/);
+            if (scenario === 'ds-present') {
+                assert.equal(dnskeyQueries, 0);
+                assert.match(result.logs.join('\n'), /ゾーン頂点の探索が完了していない/);
+            }
             if (scenario === 'mismatch') {
                 const proof = result.diagram.parent.dsAbsenceProof;
                 assert.equal(proof.signaturesVerified, true);
