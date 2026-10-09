@@ -215,10 +215,13 @@ function renderDiagram(diagram) {
     setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵(ZSKの秘密鍵はゾーンのRRsetへの署名に使われる)']);
     setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
     const dsAbsenceProof = diagram.parent.dsAbsenceProof;
+    const dsAbsenceStatus = dsAbsenceProof && dsAbsenceProof.verified
+        ? '検証成功'
+        : dsAbsenceProof && dsAbsenceProof.invalid && dsAbsenceProof.signaturesVerified ? '不整合（検証失敗）' : '未確認';
     const parentDsLines = diagram.parent.ds && diagram.parent.ds.length > 0
         ? dsText(diagram.parent.ds)
         : dsAbsenceProof
-            ? [dsAbsenceProof.verified ? 'DSなし（親側不在証明: 検証成功）' : 'DSなし（親側不在証明: 未確認）', ...(dsAbsenceProof.type ? (dsAbsenceProof.records || []).map(record => record.type + ' ' + record.name + rrsigExpirationText(record.expiration)) : []), ...(dsAbsenceProof.diagnostics || [])]
+            ? ['DSなし（親側不在証明: ' + dsAbsenceStatus + '）', ...(dsAbsenceProof.type ? (dsAbsenceProof.records || []).map(record => record.type + ' ' + record.name + rrsigExpirationText(record.expiration)) : []), ...(dsAbsenceProof.diagnostics || [])]
             : dsText(diagram.parent.ds);
     setNodeContent('parentDs', 'DS', 'blue', [...parentDsLines, '※子KSKのハッシュ値']);
     setNodeContent('childKey', 'DNSKEY', 'blue', [...keyText(childKsk, 'KSK'), '※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)']);
@@ -226,10 +229,11 @@ function renderDiagram(diagram) {
     const recordType = diagram.child.aRecordValidation && diagram.child.aRecordValidation.recordType || 'A';
     setNodeContent('childARecordValidation', 'ドメイン名に対する' + recordType + 'レコードDNSSEC検証', '', aRecordValidationText(diagram.child.aRecordValidation));
     const chainArrow = document.getElementById('chainArrow');
-    chainArrow.className = 'arrow chain-arrow ' + (diagram.checks.dsKeyMatch ? 'good' : 'bad');
+    const hasDsAbsenceProof = dsAbsenceProof && (!diagram.parent.ds || diagram.parent.ds.length === 0);
+    chainArrow.className = 'arrow chain-arrow ' + (hasDsAbsenceProof ? '' : diagram.checks.dsKeyMatch ? 'good' : 'bad');
     chainArrow.replaceChildren();
     const chainLabel = document.createElement('span');
-    chainLabel.textContent = (diagram.checks.dsKeyMatch ? 'ハッシュ一致 ✓' : 'ハッシュ不一致 ✕') + '\nDS -> KSK';
+    chainLabel.textContent = (hasDsAbsenceProof ? 'DSなし（ハッシュ照合対象なし）' : diagram.checks.dsKeyMatch ? 'ハッシュ一致 ✓' : 'ハッシュ不一致 ✕') + '\nDS -> KSK';
     chainLabel.style.whiteSpace = 'pre-line';
     chainArrow.appendChild(chainLabel);
     document.getElementById('diagram').style.display = 'block';

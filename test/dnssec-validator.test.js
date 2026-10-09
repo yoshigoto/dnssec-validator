@@ -128,6 +128,7 @@ function encodeTestDnsName(name) {
 
 function encodeTestRdata(type, data) {
     if (type === 'A') return Buffer.from(data.split('.').map(Number));
+    if (type === 'NSEC3') return dnsPacket.record(type).encode(data).subarray(2);
     if (type === 'DNSKEY') return buildDnskeyFullRdata(data);
     if (type === 'DS') {
         const rdata = Buffer.alloc(4 + data.digest.length);
@@ -141,7 +142,7 @@ function encodeTestRdata(type, data) {
 }
 
 function makeSignedRrsig(owner, signerName, type, records, signingKey) {
-    const typeCode = { A: 1, DS: 43, DNSKEY: 48 }[type];
+    const typeCode = { A: 1, DS: 43, DNSKEY: 48, NSEC3: 50 }[type];
     const fullKeyRdata = buildDnskeyFullRdata(signingKey.data);
     const now = Math.floor(Date.now() / 1000);
     const data = {
@@ -372,6 +373,21 @@ test('DS応答だけでは未署名委任と判定せず、DSありの証明不�
 
     assert.equal(noProof.records.length, 0);
     assert.equal(dsPresent.records.length, 0);
+});
+
+test('NSEC3終端一致はOpt-Outと親ゾーンとNOERRORが揃う場合だけ不整合候補とする', () => {
+    const domain = 'delegated.example.test';
+    const record = {
+        name: `${'0'.repeat(32)}.example.test`,
+        type: 'NSEC3',
+        data: { algorithm: 1, flags: 1, salt: Buffer.alloc(0), iterations: 1, nextDomain: nsec3Hash(domain, Buffer.alloc(0), 1), rrtypes: ['SOA'] }
+    };
+    const mismatch = analyzeDsAbsenceProof(domain, [record]);
+    assert.equal(mismatch.invalid, true);
+    assert.match(mismatch.diagnostics[0], /Next.*終端/);
+    assert.equal(analyzeDsAbsenceProof(domain, [{ ...record, data: { ...record.data, flags: 0 } }]).invalid, undefined);
+    assert.equal(analyzeDsAbsenceProof(domain, [{ ...record, name: `${'0'.repeat(32)}.other.test` }]).invalid, undefined);
+    assert.equal(analyzeDsAbsenceProof(domain, [record], 'SERVFAIL').invalid, undefined);
 });
 
 test('検証結果をSecure、Insecure、Bogus、判定不能に分類する', () => {
@@ -865,6 +881,47 @@ test('親子ゾーンの NS RRset を委任応答から個別に保持する', a
     assert.deepEqual(result.childNameservers, ['ns1.child.test', 'ns2.child.test']);
 });
 
+test('委任先のSOAが得られなくても委任点と親サーバーを保持する', async () => {
+    for (const failure of ['referral', 'TIMEOUT', 'REFUSED', 'address-error', 'no-address']) {
+        let queries = 0;
+        const domain = 'host.unsigned.example.test';
+        const result = await getZoneApex(domain, {
+            initialNameserver: '192.0.2.1',
+            resolveHostnameIPv4Self: async hostname => {
+                if (hostname === 'ns.example.test') return '192.0.2.2';
+                if (failure === 'address-error') throw new Error('resolution failed');
+                return failure === 'no-address' ? null : '192.0.2.3';
+            },
+            queryDirectlyUDP: async () => {
+                queries++;
+                if (queries === 1) return {
+                    rcode: 'NOERROR',
+                    authorities: [{ name: 'example.test', type: 'NS', data: 'ns.example.test' }]
+                };
+                if (queries === 2 || failure === 'referral') return {
+                    rcode: 'NOERROR',
+                    authorities: [{ name: 'unsigned.example.test', type: 'NS', data: 'ns.unsigned.example.test' }]
+                };
+                return failure === 'TIMEOUT' ? { error: 'TIMEOUT' } : { rcode: 'REFUSED' };
+            }
+        });
+        assert.equal(result.zoneApex, 'unsigned.example.test', failure);
+        assert.equal(result.parentNs, 'ns.example.test', failure);
+        assert.deepEqual(result.parentNameservers, ['ns.example.test'], failure);
+        assert.deepEqual(result.childNameservers, ['ns.unsigned.example.test'], failure);
+        assert.ok(result.discoveryError, failure);
+        if (failure === 'referral') assert.equal(queries, 3);
+    }
+});
+
+test('委任応答もSOAもない場合はゾーン頂点を推測しない', async () => {
+    const result = await getZoneApex('example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async () => ({ error: 'TIMEOUT' })
+    });
+    assert.equal(result.zoneApex, '');
+});
+
 test('親サーバーが子ゾーンにも権威を持つ場合に親子のNSを個別に特定する', async () => {
     const requests = [];
     const result = await getZoneApex('www.child.parent.test', {
@@ -1012,6 +1069,98 @@ test('署名付きの親子RRsetをAPI経由で検証し、対象署名の改ざ
         assert.equal(bogusResult.diagram.checks.dnskeySignature, true);
         assert.equal(bogusResult.diagram.checks.dsKeyMatch, true);
         assert.equal(bogusResult.diagram.child.aRecordValidation.signatures[0].trustChainVerified, false);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('referral循環でもAPIは委任点のDS不在証明を検証し、Opt-Out終端不整合を検知する', async () => {
+    const domain = 'unsigned.child.example.test';
+    const parentZone = 'child.example.test';
+    const parentKey = makeSigningKey(15, 257);
+    const parentDnskey = { name: parentZone, type: 'DNSKEY', data: parentKey.data };
+    const salt = Buffer.alloc(0);
+    const targetHash = nsec3Hash(domain, salt, 1);
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    let dsResponse;
+    let dnskeyError = false;
+    app.locals.dnssecValidationDependencies = {
+        getZoneApex: name => getZoneApex(name, {
+            initialNameserver: '192.0.2.1',
+            resolveHostnameIPv4Self: async () => '192.0.2.2',
+            queryDirectlyUDP: async (queryName, ip) => ({
+                rcode: 'NOERROR',
+                flags: 0,
+                authorities: [{
+                    name: ip === '192.0.2.1' ? 'example.test' : domain,
+                    type: 'NS', data: 'ns.example.test'
+                }]
+            })
+        }),
+        getARecord: async name => {
+            assert.equal(name, 'ns.example.test');
+            return '192.0.2.2';
+        },
+        getResourceRecord: async (name, ip, type) => {
+            assert.equal(ip, '192.0.2.2');
+            if (type === 'DS') {
+                assert.equal(name, domain);
+                return dsResponse;
+            }
+            assert.equal(type, 'DNSKEY');
+            assert.equal(name, parentZone);
+            if (dnskeyError) throw new Error('DNSKEY timeout');
+            return { resourceRecords: [parentDnskey] };
+        },
+        compareAuthorityRecordSets: async (name, servers, type) => ({
+            recordType: type, complete: servers.length > 0,
+            consistent: servers.length > 0, hasDifferences: false, servers: []
+        }),
+        diagnoseDsProposals: async () => { throw new Error('子への問い合わせは不要'); }
+    };
+    const server = app.listen(0);
+    try {
+        for (const scenario of ['mismatch', 'valid', 'unsigned-proof', 'bad-signature', 'dnskey-error', 'no-proof', 'servfail']) {
+            const record = {
+                name: `${'0'.repeat(32)}.${parentZone}`, type: 'NSEC3',
+                data: {
+                    algorithm: 1, flags: 1, iterations: 1, salt,
+                    nextDomain: scenario === 'valid' ? Buffer.alloc(20, 255) : targetHash,
+                    rrtypes: ['NS', 'SOA', 'RRSIG', 'DNSKEY', 'NSEC3PARAM']
+                }
+            };
+            const signature = makeSignedRrsig(record.name, parentZone, 'NSEC3', [record], parentKey);
+            if (scenario === 'bad-signature') signature.data.signature[0] ^= 255;
+            dnskeyError = scenario === 'dnskey-error';
+            dsResponse = {
+                rcode: scenario === 'servfail' ? 'SERVFAIL' : 'NOERROR',
+                resourceRecords: [],
+                denialRecords: scenario === 'no-proof' ? [] : [record],
+                denialRrsigRecords: scenario === 'unsigned-proof' ? [] : [signature]
+            };
+            const response = await request(server, {
+                method: 'POST', path: '/api/validate',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain: `host.${domain}` })
+            });
+            assert.equal(response.statusCode, 200);
+            const result = JSON.parse(response.body);
+            const expected = scenario === 'valid' ? 'insecure' : scenario === 'mismatch' ? 'bogus' : 'indeterminate';
+            assert.equal(result.status, expected, scenario);
+            assert.equal(result.success, false, scenario);
+            assert.equal(result.diagram.child.name, domain, scenario);
+            assert.equal(result.diagram.parent.dsAbsenceProof.verified, scenario === 'valid', scenario);
+            assert.match(result.logs.join('\n'), /referral.*繰り返/);
+            if (scenario === 'mismatch') {
+                const proof = result.diagram.parent.dsAbsenceProof;
+                assert.equal(proof.signaturesVerified, true);
+                assert.equal(proof.invalid, true);
+                assert.match(proof.diagnostics.join('\n'), /Next.*終端/);
+                assert.equal(proof.observedNsec3[0].nextHash, toBase32Hex(targetHash));
+            }
+        }
     } finally {
         if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
         else app.locals.dnssecValidationDependencies = previousDependencies;

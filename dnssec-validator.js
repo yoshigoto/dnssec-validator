@@ -230,15 +230,27 @@ async function getZoneApex(domain, options = {}) {
     let lastDelegationZone = '';
     let rcode = '';
     let hasCnameOrDname = false;
+    let discoveryError = '';
 
     for (let i = 0; i < 10; i++) {
         const isRootNameserver = currentNs === ROOT_NAMESERVER;
-        const currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
-            queryDirectlyUDP: options.queryDirectlyUDP,
-            knownAddresses: options.knownAddresses,
-            dnsResponseCache
-        });
+        let currentServerIp;
+        try {
+            currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
+                queryDirectlyUDP: options.queryDirectlyUDP,
+                knownAddresses: options.knownAddresses,
+                dnsResponseCache
+            });
+        } catch (error) {
+            if (!lastDelegationZone) throw error;
+            discoveryError = `委任先 [${currentNs}] の IP アドレス取得失敗: ${error.message}`;
+            break;
+        }
         if (!currentServerIp) {
+            if (lastDelegationZone) {
+                discoveryError = `委任先 [${currentNs}] の IP アドレスを自己解決できません`;
+                break;
+            }
             throw new Error(`ネームサーバー [${currentNs}] の IP アドレスを自己解決できません`);
         }
         const res = await queryUdp(domain, currentServerIp, dnsResponseCache, 'SOA');
@@ -292,9 +304,14 @@ async function getZoneApex(domain, options = {}) {
         if (!isAuthoritative && authorities.length > 0) {
             const nsRecords = authorities.filter(r => r.type === 'NS');
             if (nsRecords.length > 0) {
+                const delegationZone = normalizeResolverDnsName(nsRecords[0].name);
+                if (delegationZone === lastDelegationZone) {
+                    discoveryError = `委任点 [${delegationZone}] の referral が繰り返され、委任先の権威 SOA を取得できませんでした。`;
+                    break;
+                }
                 parentNameservers = childNameservers;
                 childNameservers = nsRecords.map(record => record.data);
-                lastDelegationZone = normalizeResolverDnsName(nsRecords[0].name);
+                lastDelegationZone = delegationZone;
                 // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
@@ -331,6 +348,11 @@ async function getZoneApex(domain, options = {}) {
         }
     }
 
+    if (!zoneApex && lastDelegationZone && !hasCnameOrDname) {
+        zoneApex = lastDelegationZone;
+        discoveryError ||= `委任点 [${zoneApex}] の権威 SOA を取得できませんでした。(rcode: ${rcode})`;
+    }
+
     if (zoneApex && childNameservers.length > 0 && lastDelegationZone !== normalizeResolverDnsName(zoneApex)) {
         parentNameservers = childNameservers;
         parentNs = parentNameservers[0];
@@ -355,7 +377,7 @@ async function getZoneApex(domain, options = {}) {
         }
     }
 
-    return { currentNs: currentNs, parentNs: parentNs, parentNameservers, childNameservers, zoneApex: zoneApex, rcode: rcode, hasCnameOrDname: hasCnameOrDname };
+    return { currentNs: currentNs, parentNs: parentNs, parentNameservers, childNameservers, zoneApex: zoneApex, rcode: rcode, hasCnameOrDname: hasCnameOrDname, discoveryError };
 }
 
 // --- ヘルパー関数: RRSIG 署名の有効期限チェック ---
@@ -760,6 +782,9 @@ function classifyValidationResult(diagram, timedOut = false) {
     if (timedOut) return { status: 'indeterminate', statusLabel: '判定不能（タイムアウト）', nextChecks: ['権威サーバーへの疎通を確認し、時間をおいて再試行してください。'] };
     if (parent.dsAbsenceProof && parent.dsAbsenceProof.verified === true) {
         return { status: 'insecure', statusLabel: 'Insecure（未署名の委任）', nextChecks: ['親側のNSEC/NSEC3不在証明を検証しました。DNSSECを使う場合は、子ゾーンのDNSKEY/RRSIGを整えて親にDSを登録してください。', '未署名運用が意図したものか、ドメイン管理者に確認してください。'] };
+    }
+    if (parent.dsAbsenceProof && parent.dsAbsenceProof.invalid && parent.dsAbsenceProof.signaturesVerified) {
+        return { status: 'bogus', statusLabel: 'Bogus（DS不在証明の不整合）', nextChecks: ['親ゾーンのNSEC3 Opt-Outのカバー範囲を確認してください。対象名のハッシュは範囲の終端（Next）には含まれません。', '親ゾーンのNSEC3を再生成・署名し、各権威サーバーへ反映してください。'] };
     }
     if (!parent.ds || parent.ds.length === 0) {
         return { status: 'indeterminate', statusLabel: '判定不能（DS不在を確認できません）', nextChecks: ['親側のNSEC/NSEC3不在証明とそのRRSIGが取得・検証できるか確認してください。', '親の権威サーバーへの疎通を確認して再試行してください。'] };
@@ -1166,6 +1191,20 @@ function analyzeDsAbsenceProof(domain, denialRecords, rcode = 'NOERROR') {
         return { records: [nsec3OptOut], type: 'NSEC3', diagnostics: ['NSEC3 Opt-Outによる未署名委任の不在証明'], observedNsec, observedNsec3 };
     }
 
+    const boundaryMismatch = records.find(record => {
+        if (record.type !== 'NSEC3' || record.data.algorithm !== 1 || (record.data.flags & 1) === 0) return false;
+        const parentZone = normalizeDnsName(record.name).split('.').slice(1).join('.');
+        return normalizedDomain.endsWith(`.${parentZone}`) &&
+            toBase32Hex(nsec3Hash(domain, record.data.salt, record.data.iterations)) === toBase32Hex(record.data.nextDomain);
+    });
+    if (boundaryMismatch) {
+        return {
+            records: [boundaryMismatch], type: 'NSEC3', invalid: true,
+            diagnostics: [`NSEC3 Opt-Outのカバー範囲が不整合です: ${domain} のハッシュ ${toBase32Hex(boundaryMismatch.data.nextDomain)} は Next と一致しますが、範囲の終端はカバー対象に含まれません。`],
+            observedNsec, observedNsec3
+        };
+    }
+
     if (records.length === 0) diagnostics.push('親サーバーの応答にNSEC/NSEC3不在証明がありません');
     else if (diagnostics.length === 0) diagnostics.push('委任点のDS不在を示すNSEC/NSEC3がありません');
     return { records: [], type: '', diagnostics, observedNsec, observedNsec3 };
@@ -1318,6 +1357,9 @@ app.post('/api/validate', async (req, res) => {
                 return sendJson(200, { success: false, logs: [...logs, `${zoneApexInfo.currentNs} から先の探索ができませんでした。(rcode: ${zoneApexInfo.rcode})`], diagram });
             }
         }
+        if (zoneApexInfo.discoveryError) {
+            logs.push(zoneApexInfo.discoveryError, `委任点 [${zoneApexInfo.zoneApex}] を対象に、親側のDSと不在証明の検証を続行します。`);
+        }
         diagram.parent.name = zoneApexInfo.zoneApex;
         diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || zoneApexInfo.parentNs || zoneApexInfo.currentNs;
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -1325,7 +1367,7 @@ app.post('/api/validate', async (req, res) => {
         const parentAuthorityNames = zoneApexInfo.parentNameservers.length > 0
             ? zoneApexInfo.parentNameservers
             : zoneApexInfo.parentNs ? [zoneApexInfo.parentNs] : [];
-        const childAuthorityNames = zoneApexInfo.childNameservers.length > 0
+        const childAuthorityNames = zoneApexInfo.discoveryError ? [] : zoneApexInfo.childNameservers.length > 0
             ? zoneApexInfo.childNameservers
             : [zoneApexInfo.currentNs];
         const comparisonOptions = { dnsResponseCache: dnssecResponseCache };
@@ -1365,7 +1407,9 @@ app.post('/api/validate', async (req, res) => {
         }
 
         let childIp = '';
-        if (parentDsInfo) {
+        if (zoneApexInfo.discoveryError) {
+            diagram.dsProposal = { parentDs: [], cds: null, cdnskey: null, notes: ['委任先の権威 SOA を取得できないため、子ゾーンの提案の取得は省略しました。'] };
+        } else if (parentDsInfo) {
             try {
                 childIp = await resolveNameserverAddress(zoneApexInfo.currentNs);
                 diagram.dsProposal = await diagnoseDsProposal(zoneApexInfo.zoneApex, parentDsInfo, childIp);
@@ -1378,10 +1422,12 @@ app.post('/api/validate', async (req, res) => {
         
         if (!dsInfo || dsInfo.resourceRecords.length === 0) {
             try {
-                targetNs = zoneApexInfo.currentNs;
-                diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
-                parentIp = await resolveNameserverAddress(targetNs);
-                dsInfo = await fetchResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+                if (!zoneApexInfo.discoveryError) {
+                    targetNs = zoneApexInfo.currentNs;
+                    diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
+                    parentIp = await resolveNameserverAddress(targetNs);
+                    dsInfo = await fetchResourceRecord(zoneApexInfo.zoneApex, parentIp, 'DS');
+                }
             } catch (err) {
                 logs.push(`現在のサーバー [${targetNs}] へのクエリ失敗: ${err.message}`);
                 parentIp = '';
@@ -1392,6 +1438,8 @@ app.post('/api/validate', async (req, res) => {
                 const denialProof = {
                     rcode: parentDsInfo && parentDsInfo.rcode || '',
                     type: proofResult.type,
+                    invalid: Boolean(proofResult.invalid),
+                    signaturesVerified: false,
                     verified: false,
                     diagnostics: [...proofResult.diagnostics],
                     observedNsec: proofResult.observedNsec,
@@ -1431,11 +1479,14 @@ app.post('/api/validate', async (req, res) => {
                         recordResults.push(verified);
                         if (!verified) denialProof.diagnostics.push(`対応する有効な${record.type} RRSIGを検証できませんでした: ${record.name}`);
                     }
-                    denialProof.verified = recordResults.length > 0 && recordResults.every(Boolean);
+                    denialProof.signaturesVerified = recordResults.length > 0 && recordResults.every(Boolean);
+                    denialProof.verified = !denialProof.invalid && denialProof.signaturesVerified;
                 }
                 diagram.parent.dsAbsenceProof = denialProof;
                 const absenceMessage = denialProof.verified
                     ? '親側のNSEC/NSEC3不在証明を検証しました。DNSSEC未署名の委任です。'
+                    : denialProof.invalid && denialProof.signaturesVerified
+                        ? '親側のNSEC3署名は有効ですが、Opt-Outのカバー範囲が不整合なためDS不在証明は成立しません。'
                     : '親サーバーにDSレコードが見つかりませんが、不在証明を検証できないため未署名委任とは判定できません。';
                 return sendJson(200, { success: false, logs: [...logs, absenceMessage, ...denialProof.diagnostics], diagram });
             }
