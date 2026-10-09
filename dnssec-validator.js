@@ -350,7 +350,7 @@ async function getZoneApex(domain, options = {}) {
 
     if (!zoneApex && lastDelegationZone && !hasCnameOrDname) {
         zoneApex = lastDelegationZone;
-        discoveryError ||= `委任点 [${zoneApex}] の権威 SOA を取得できませんでした。(rcode: ${rcode})`;
+        discoveryError ||= `委任点 [${zoneApex}] の権威 SOA を取得できませんでした。`;
     }
 
     if (zoneApex && childNameservers.length > 0 && lastDelegationZone !== normalizeResolverDnsName(zoneApex)) {
