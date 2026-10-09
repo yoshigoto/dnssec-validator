@@ -10,6 +10,17 @@ import validate_all_domains as validator
 
 
 class ValidateAllDomainsTests(unittest.TestCase):
+    def new_domains(self):
+        return [
+            f"type.{record_type}.mismatch.{proof}.rsasha256.dnssec-check.jp"
+            for proof in ("nsec", "nsec3")
+            for record_type in ("mx", "txt")
+        ] + [
+            f"{kind}.mismatch.nsec3.{parameters}.rsasha256.dnssec-check.jp"
+            for parameters in ("iter0.saltA1B2", "iter1.nosalt", "iter1.saltA1B2")
+            for kind in ("cover", "type", "optout")
+        ]
+
     def http_error(self, status=429, retry_after="43", body=None):
         headers = Message()
         if retry_after is not None:
@@ -26,6 +37,103 @@ class ValidateAllDomainsTests(unittest.TestCase):
         response.status = 200
         response.read.return_value = json.dumps({"success": success, "logs": []}).encode()
         return response
+
+    def test_fallback_includes_all_new_domains_without_duplicates(self):
+        with patch.object(validator.urllib.request, "urlopen", side_effect=urllib.error.URLError("offline")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            domains = validator.fetch_published_domains()
+        self.assertIn("フォールバック", output.getvalue())
+        self.assertEqual(len(domains), len(set(domains)))
+        for domain in self.new_domains():
+            self.assertIn(domain, domains)
+
+    def test_published_page_extracts_new_domains_and_preserves_order(self):
+        expected = self.new_domains()
+        response = self.response()
+        response.read.return_value = "".join(
+            f'<a href="https://validator.test/?domain={domain}">検証</a>'
+            for domain in expected + expected[:1]
+        ).encode()
+        with patch.object(validator.urllib.request, "urlopen", return_value=response), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(validator.fetch_published_domains(), expected)
+
+    def test_record_type_selection(self):
+        for domain in self.new_domains():
+            expected = "MX" if domain.startswith("type.mx.") else (
+                "TXT" if domain.startswith("type.txt.") else "A"
+            )
+            for name in (domain, domain.upper() + "."):
+                with self.subTest(domain=name):
+                    self.assertEqual(validator.record_type_for_domain(name), expected)
+        for domain in ("success.rsasha256.dnssec-check.jp", "type.mx.example.test"):
+            self.assertEqual(validator.record_type_for_domain(domain), "A")
+
+    def test_mx_and_txt_requests_preserve_record_type_during_retry(self):
+        for record_type in ("MX", "TXT"):
+            with self.subTest(record_type=record_type), \
+                    patch.object(validator.urllib.request, "urlopen", side_effect=[
+                        self.http_error(), self.response(False)
+                    ]) as urlopen, patch.object(validator.time, "sleep"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = validator.validate_domain(
+                    "http://localhost", "example.test", record_type=record_type
+                )
+            self.assertEqual(result["status"], 200)
+            for call in urlopen.call_args_list:
+                self.assertEqual(json.loads(call.args[0].data), {
+                    "domain": "example.test", "recordType": record_type
+                })
+
+    def test_isolated_validation_passes_payload_as_data(self):
+        for record_type in ("A", "MX", "TXT"):
+            with self.subTest(record_type=record_type), \
+                    patch.object(validator.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = json.dumps({
+                    "status": 200, "data": {"success": False, "logs": []}
+                })
+                domain = "example'test"
+                result = validator.run_isolated_validation(
+                    domain, "/project", record_type=record_type
+                )
+            command = run.call_args.args[0]
+            self.assertEqual(command[:3], ["node", "--input-type=module", "-e"])
+            self.assertIn("import { app }", command[3])
+            self.assertNotIn(domain, command[3])
+            expected = {"domain": domain}
+            if record_type != "A":
+                expected["recordType"] = record_type
+            self.assertEqual(json.loads(command[4]), expected)
+            self.assertEqual(result["status"], 200)
+
+    def test_main_routes_new_domains_with_correct_record_types(self):
+        domains = self.new_domains()
+        for use_url in (False, True):
+            argv = ["validate_all_domains.py"]
+            if use_url:
+                argv += ["--url", "http://localhost"]
+            with self.subTest(use_url=use_url), \
+                    patch.object(validator.sys, "argv", argv), \
+                    patch.object(validator, "fetch_published_domains", return_value=domains), \
+                    patch.object(validator, "validate_domain") as remote, \
+                    patch.object(validator, "run_isolated_validation") as isolated, \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    self.assertRaises(SystemExit) as exit_result:
+                runner = remote if use_url else isolated
+                runner.return_value = {
+                    "status": 200, "success": False, "error": None, "logs": [], "elapsed": 0
+                }
+                validator.main()
+            self.assertEqual(exit_result.exception.code, 0)
+            self.assertEqual(runner.call_count, 13)
+            (isolated if use_url else remote).assert_not_called()
+            for domain, call in zip(domains, runner.call_args_list):
+                self.assertEqual(
+                    call.kwargs["record_type"], validator.record_type_for_domain(domain)
+                )
+            self.assertIn(" | MX | ", output.getvalue())
+            self.assertIn(" | TXT | ", output.getvalue())
 
     def test_retry_after_then_success_preserves_request(self):
         with patch.object(validator.urllib.request, "urlopen", side_effect=[

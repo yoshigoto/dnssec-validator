@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-dnssec-check.jp の掲載ドメイン全56件をローカルまたは公開サーバーの DNSSEC バリデータ API に対し一括検証するテストスクリプト。
+dnssec-check.jp の掲載ドメインをローカルまたは公開サーバーの DNSSEC バリデータ API に対し一括検証するテストスクリプト。
 
 使い方:
     python3 test/validate_all_domains.py
@@ -96,14 +96,44 @@ def fetch_published_domains():
         "missing.cover.mismatch.nsec.rsasha256.dnssec-check.jp",
         "target.type.mismatch.nsec.rsasha256.dnssec-check.jp",
         "missing.cover.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "target.type.mismatch.nsec3.rsasha256.dnssec-check.jp"
+        "target.type.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "unsigned.optout.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "type.mx.mismatch.nsec.rsasha256.dnssec-check.jp",
+        "type.txt.mismatch.nsec.rsasha256.dnssec-check.jp",
+        "type.mx.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "type.txt.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "cover.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "type.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "optout.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "cover.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "type.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "optout.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "cover.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
+        "type.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
+        "optout.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp"
     ]
 
-def validate_domain(target_url, domain, timeout=30, rate_limit_retries=3):
+def record_type_for_domain(domain):
+    name = domain.lower().rstrip(".")
+    for record_type in ("MX", "TXT"):
+        if name in (
+            f"type.{record_type.lower()}.mismatch.nsec.rsasha256.dnssec-check.jp",
+            f"type.{record_type.lower()}.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        ):
+            return record_type
+    return "A"
+
+def validation_payload(domain, record_type):
+    payload = {"domain": domain}
+    if record_type != "A":
+        payload["recordType"] = record_type
+    return payload
+
+def validate_domain(target_url, domain, timeout=30, rate_limit_retries=3, record_type="A"):
     """429 の場合は Retry-After の秒数だけ待ち、回数を制限して再試行する"""
     started = time.monotonic()
     for attempt in range(rate_limit_retries + 1):
-        result = validate_domain_once(target_url, domain, timeout)
+        result = validate_domain_once(target_url, domain, timeout, record_type)
         if result["status"] != 429 or attempt == rate_limit_retries:
             result["elapsed"] = int((time.monotonic() - started) * 1000)
             return result
@@ -112,10 +142,10 @@ def validate_domain(target_url, domain, timeout=30, rate_limit_retries=3):
         print(f"  -> {domain}: HTTP 429 ({result['error']})。{wait_seconds}秒待機して再試行します ({attempt + 1}/{rate_limit_retries})。")
         time.sleep(wait_seconds)
 
-def validate_domain_once(target_url, domain, timeout=30):
+def validate_domain_once(target_url, domain, timeout=30, record_type="A"):
     """単一のドメインに対して POST /api/validate を実行する"""
     endpoint = target_url.rstrip('/') + '/api/validate'
-    payload = json.dumps({"domain": domain}).encode('utf-8')
+    payload = json.dumps(validation_payload(domain, record_type)).encode('utf-8')
     headers = {"Content-Type": "application/json"}
     
     req = urllib.request.Request(endpoint, data=payload, headers=headers, method='POST')
@@ -152,32 +182,34 @@ def validate_domain_once(target_url, domain, timeout=30):
         elapsed = int((time.time() - t0) * 1000)
         return {"status": 500, "success": False, "error": str(e), "logs": [], "elapsed": elapsed}
 
-def run_isolated_validation(domain, project_root, timeout=30):
+def run_isolated_validation(domain, project_root, timeout=30, record_type="A"):
     """アプリ内レートリミットを回避するため独立した Node プロセスを起動して1件検証する"""
-    node_code = f"""
-const {{ app }} = require('./dnssec-validator.js');
-const server = app.listen(0, '127.0.0.1', async () => {{
+    node_code = """
+import { app } from './dnssec-validator.js';
+const payload = JSON.parse(process.argv[1]);
+const server = app.listen(0, '127.0.0.1', async () => {
     const port = server.address().port;
-    try {{
-        const res = await fetch('http://127.0.0.1:' + port + '/api/validate', {{
+    try {
+        const res = await fetch('http://127.0.0.1:' + port + '/api/validate', {
             method: 'POST',
-            headers: {{ 'content-type': 'application/json' }},
-            body: JSON.stringify({{ domain: '{domain}' }})
-        }});
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
         const json = await res.json();
-        console.log(JSON.stringify({{ status: res.status, data: json }}));
-    }} catch (err) {{
-        console.log(JSON.stringify({{ status: 500, error: err.message }}));
-    }} finally {{
+        console.log(JSON.stringify({ status: res.status, data: json }));
+    } catch (err) {
+        console.log(JSON.stringify({ status: 500, error: err.message }));
+    } finally {
         server.close();
         process.exit(0);
-    }}
-}});
+    }
+});
 """
     t0 = time.time()
     try:
         proc = subprocess.run(
-            ["node", "-e", node_code],
+            ["node", "--input-type=module", "-e", node_code,
+             json.dumps(validation_payload(domain, record_type))],
             cwd=project_root,
             capture_output=True,
             text=True,
@@ -219,17 +251,19 @@ def main():
     
     for idx, domain in enumerate(domains, 1):
         expected_success = domain.startswith("success.") or domain.startswith("www.success.")
+        record_type = record_type_for_domain(domain)
         
         if args.url:
-            res = validate_domain(args.url, domain, timeout=args.timeout, rate_limit_retries=args.rate_limit_retries)
+            res = validate_domain(args.url, domain, timeout=args.timeout, rate_limit_retries=args.rate_limit_retries, record_type=record_type)
         else:
-            res = run_isolated_validation(domain, project_root, timeout=args.timeout)
+            res = run_isolated_validation(domain, project_root, timeout=args.timeout, record_type=record_type)
             
         actual_success = res["success"]
         is_match = res["status"] == 200 and not res["error"] and actual_success == expected_success
         
         results.append({
             "domain": domain,
+            "record_type": record_type,
             "expected": expected_success,
             "actual": actual_success,
             "match": is_match,
@@ -240,7 +274,7 @@ def main():
         exp_str = "SUCCESS" if expected_success else "FAILURE"
         act_str = "SUCCESS" if actual_success else "FAILURE"
         
-        print(f"[{idx:2d}/{len(domains)}] {status_str} | {domain:<62s} | 期待:{exp_str:<7s} | 実際:{act_str:<7s} ({res['elapsed']}ms)")
+        print(f"[{idx:2d}/{len(domains)}] {status_str} | {domain:<62s} | {record_type} | 期待:{exp_str:<7s} | 実際:{act_str:<7s} ({res['elapsed']}ms)")
 
     total = len(results)
     passed_count = sum(1 for r in results if r["match"])
@@ -256,7 +290,7 @@ def main():
         print("\n--- 不一致ドメイン詳細 ---")
         for r in results:
             if not r["match"]:
-                print(f"- {r['domain']}")
+                print(f"- {r['domain']} ({r['record_type']})")
                 print(f"    期待値: {r['expected']} | 実際の判定: {r['actual']} (HTTP Status: {r['res']['status']})")
                 if r['res']['error']:
                     print(f"    Error: {r['res']['error']}")
