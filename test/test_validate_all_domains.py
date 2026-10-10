@@ -12,13 +12,22 @@ import validate_all_domains as validator
 class ValidateAllDomainsTests(unittest.TestCase):
     def new_domains(self):
         return [
-            f"type.{record_type}.mismatch.{proof}.rsasha256.dnssec-check.jp"
+            f"target.type.{record_type}.mismatch.{proof}.rsasha256.dnssec-check.jp"
             for proof in ("nsec", "nsec3")
             for record_type in ("mx", "txt")
         ] + [
-            f"{kind}.mismatch.nsec3.{parameters}.rsasha256.dnssec-check.jp"
-            for parameters in ("iter0.saltA1B2", "iter1.nosalt", "iter1.saltA1B2")
-            for kind in ("cover", "type", "optout")
+            f"{kind}.nsec3.{parameters}.rsasha256.dnssec-check.jp"
+            for parameters in (
+                "iter0.nosalt",
+                "iter0.saltA1B2",
+                "iter1.nosalt",
+                "iter1.saltA1B2",
+            )
+            for kind in (
+                "missing.cover.mismatch",
+                "target.type.mismatch",
+                "unsigned.optout.mismatch",
+            )
         ]
 
     def http_error(self, status=429, retry_after="43", body=None):
@@ -51,7 +60,9 @@ class ValidateAllDomainsTests(unittest.TestCase):
         expected = self.new_domains()
         response = self.response()
         response.read.return_value = "".join(
-            f'<a href="https://validator.test/?domain={domain}">検証</a>'
+            f'<a href="https://validator.test/?domain={domain}'
+            f'{"&recordType=MX" if ".mx." in domain else "&recordType=TXT" if ".txt." in domain else ""}">'
+            "検証</a>"
             for domain in expected + expected[:1]
         ).encode()
         with patch.object(validator.urllib.request, "urlopen", return_value=response), \
@@ -60,8 +71,8 @@ class ValidateAllDomainsTests(unittest.TestCase):
 
     def test_record_type_selection(self):
         for domain in self.new_domains():
-            expected = "MX" if domain.startswith("type.mx.") else (
-                "TXT" if domain.startswith("type.txt.") else "A"
+            expected = "MX" if domain.startswith("target.type.mx.") else (
+                "TXT" if domain.startswith("target.type.txt.") else "A"
             )
             for name in (domain, domain.upper() + "."):
                 with self.subTest(domain=name):
@@ -126,7 +137,7 @@ class ValidateAllDomainsTests(unittest.TestCase):
                 }
                 validator.main()
             self.assertEqual(exit_result.exception.code, 0)
-            self.assertEqual(runner.call_count, 13)
+            self.assertEqual(runner.call_count, len(domains))
             (isolated if use_url else remote).assert_not_called()
             for domain, call in zip(domains, runner.call_args_list):
                 self.assertEqual(

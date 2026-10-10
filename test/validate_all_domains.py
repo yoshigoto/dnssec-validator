@@ -49,7 +49,7 @@ def fetch_published_domains():
             html = res.read().decode("utf-8")
         
         domains = []
-        for match in re.finditer(r'href="([^"]*[\?&]domain=[^"#&]+)"', html):
+        for match in re.finditer(r'href="([^"]*[\?&]domain=[^"#]+)"', html):
             parsed = urlparse(match.group(1))
             qs = parse_qs(parsed.query)
             if "domain" in qs and qs["domain"]:
@@ -95,22 +95,22 @@ def fetch_published_domains():
         "corrupted.sign.a.error.ed448.dnssec-check.jp",
         "missing.cover.mismatch.nsec.rsasha256.dnssec-check.jp",
         "target.type.mismatch.nsec.rsasha256.dnssec-check.jp",
-        "missing.cover.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "target.type.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "unsigned.optout.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "type.mx.mismatch.nsec.rsasha256.dnssec-check.jp",
-        "type.txt.mismatch.nsec.rsasha256.dnssec-check.jp",
-        "type.mx.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "type.txt.mismatch.nsec3.rsasha256.dnssec-check.jp",
-        "cover.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
-        "type.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
-        "optout.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
-        "cover.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
-        "type.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
-        "optout.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
-        "cover.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
-        "type.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
-        "optout.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp"
+        "target.type.mx.mismatch.nsec.rsasha256.dnssec-check.jp",
+        "target.type.txt.mismatch.nsec.rsasha256.dnssec-check.jp",
+        "target.type.mx.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "target.type.txt.mismatch.nsec3.rsasha256.dnssec-check.jp",
+        "missing.cover.mismatch.nsec3.iter0.nosalt.rsasha256.dnssec-check.jp",
+        "target.type.mismatch.nsec3.iter0.nosalt.rsasha256.dnssec-check.jp",
+        "unsigned.optout.mismatch.nsec3.iter0.nosalt.rsasha256.dnssec-check.jp",
+        "missing.cover.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "target.type.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "unsigned.optout.mismatch.nsec3.iter0.saltA1B2.rsasha256.dnssec-check.jp",
+        "missing.cover.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "target.type.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "unsigned.optout.mismatch.nsec3.iter1.nosalt.rsasha256.dnssec-check.jp",
+        "missing.cover.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
+        "target.type.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp",
+        "unsigned.optout.mismatch.nsec3.iter1.saltA1B2.rsasha256.dnssec-check.jp"
     ]
 
 def record_type_for_domain(domain):
@@ -119,6 +119,8 @@ def record_type_for_domain(domain):
         if name in (
             f"type.{record_type.lower()}.mismatch.nsec.rsasha256.dnssec-check.jp",
             f"type.{record_type.lower()}.mismatch.nsec3.rsasha256.dnssec-check.jp",
+            f"target.type.{record_type.lower()}.mismatch.nsec.rsasha256.dnssec-check.jp",
+            f"target.type.{record_type.lower()}.mismatch.nsec3.rsasha256.dnssec-check.jp",
         ):
             return record_type
     return "A"
