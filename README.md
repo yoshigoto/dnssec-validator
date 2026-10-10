@@ -4,7 +4,7 @@
 
 ## 公開 URL
 
-<https://www.on-link.jp/dnssecvalidator/>
+<https://www.on-link.jp/dnssec-validator/>
 
 ## 主な機能
 
@@ -33,7 +33,7 @@
 例:
 
 ```text
-https://www.on-link.jp/dnssecvalidator/?domain=example.com&recordType=AAAA
+https://www.on-link.jp/dnssec-validator/?domain=example.com&recordType=AAAA
 ```
 
 ## ローカルでの起動
