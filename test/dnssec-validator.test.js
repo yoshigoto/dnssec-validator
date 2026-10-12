@@ -973,6 +973,8 @@ test('GET / は UI を返し、セキュリティヘッダーを付ける', asyn
         assert.equal(response.headers['x-content-type-options'], 'nosniff');
         assert.equal(response.headers['x-frame-options'], 'DENY');
         assert.match(response.body, /DNSSEC委任状態検証ツール/);
+        assert.match(response.body, /body\s*\{[^}]*text-autospace:\s*normal/s);
+        assert.match(response.body, /\.identifier\s*\{[^}]*text-autospace:\s*no-autospace/s);
     } finally {
         await new Promise(resolve => server.close(resolve));
     }

@@ -124,6 +124,14 @@ function setNodeContent(nodeId, title, titleColor, lines) {
     node.append(titleElement, metaElement);
 }
 
+function setLabeledIdentifier(elementId, label, value, suffix = '') {
+    const element = document.getElementById(elementId);
+    const identifier = document.createElement('span');
+    identifier.className = 'identifier';
+    identifier.textContent = sanitizeDisplayText(value);
+    element.replaceChildren(document.createTextNode(label), identifier, document.createTextNode(suffix));
+}
+
 function emptyDiagram(domain) {
     return { parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null }, child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null }, checks: { dsSignature: false, dnskeySignature: false, dsKeyMatch: false }, authorityChecks: null, dsProposal: null };
 }
@@ -190,8 +198,10 @@ function renderAuthorityComparisons(authorityChecks) {
         for (const server of comparison.servers || []) {
             const row = document.createElement('tr');
             const nameCell = document.createElement('td');
+            nameCell.className = 'identifier';
             nameCell.textContent = sanitizeDisplayText(server.name);
             const addressCell = document.createElement('td');
+            addressCell.className = 'identifier';
             addressCell.textContent = sanitizeDisplayText(server.ip || '未取得');
             const recordsCell = document.createElement('td');
             recordsCell.textContent = server.status === 'error'
@@ -209,9 +219,9 @@ function renderDiagram(diagram) {
     renderDsProposal(diagram.dsProposal);
     const parentKey = diagram.parent.dnskey.filter(key => key.flags === 256);
     const childKsk = diagram.child.dnskey.filter(key => key.flags === 257);
-    document.getElementById('parentZoneTitle').textContent = '親ゾーン / 委任元 (' + (diagram.parent.server || '権威サーバー未確認') + ')';
-    document.getElementById('childZoneTitle').textContent = '子ゾーン / 委任先 (' + (diagram.child.server || '権威サーバー未確認') + ')';
-    document.getElementById('zoneApexSummary').textContent = 'ゾーン頂点：' + (diagram.parent.name || diagram.child.name || '未確認');
+    setLabeledIdentifier('parentZoneTitle', '親ゾーン / 委任元 (', diagram.parent.server || '権威サーバー未確認', ')');
+    setLabeledIdentifier('childZoneTitle', '子ゾーン / 委任先 (', diagram.child.server || '権威サーバー未確認', ')');
+    setLabeledIdentifier('zoneApexSummary', 'ゾーン頂点：', diagram.parent.name || diagram.child.name || '未確認');
     setNodeContent('parentKey', 'DNSKEY', '', [...keyText(parentKey, 'ZSK'), '※DSの署名検証用公開鍵(ZSKの秘密鍵はゾーンのRRsetへの署名に使われる)']);
     setNodeContent('parentRrsig', 'RRSIG', '', [...rrsigText(diagram.parent.rrsig), '※DSを対象とする電子署名']);
     const dsAbsenceProof = diagram.parent.dsAbsenceProof;
