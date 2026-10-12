@@ -815,7 +815,7 @@ test('out-of-bailiwick の参照アドレスは使わず NS 名を自己解決�
     assert.equal(result.zoneApex, 'child.example.test');
 });
 
-test('委任先が同じ IP の場合も親子同居として探索結果を保持する', async () => {
+test('委任先が同じ IP アドレスの場合も親子同居として探索結果を保持する', async () => {
     const requests = [];
     const sharedNameserver = '192.0.2.53';
     const result = await getZoneApex('host.co-located.test', {

@@ -38,7 +38,7 @@ const ROOT_NAMESERVER = ROOT_SERVER_BOOTSTRAP_IP;
 const dnssecResponseCache = new Map();
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
-const rateLimitMap = new Map(); // IP: { count, resetTime }
+const rateLimitMap = new Map(); // IP アドレス: { count, resetTime }
 const API_VALIDATE_TIMEOUT_MS = 25000; // ホスティング基盤側のゲートウェイタイムアウト(HTMLエラーページ化)より先に必ずJSONで応答するための上限
 const VALIDATION_RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'CAA', 'SRV'];
 
@@ -212,7 +212,7 @@ async function getARecord(domain, options = {}) {
         dnsResponseCache: options.dnsResponseCache
     });
     if (!ipAddress) {
-        throw new Error(`Aレコード取得失敗[${domain}]: ルートからの自己解決でIPアドレスが見つかりません`);
+        throw new Error(`Aレコード取得失敗[${domain}]: ルートからの自己解決でIP アドレスが見つかりません`);
     }
     return ipAddress;
 }
