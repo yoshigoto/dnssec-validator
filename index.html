@@ -38,8 +38,8 @@
         .next-checks-list { margin: 0; padding-left: 20px; }
         .next-checks-list li { margin: 3px 0; }
         .diagram { display: none; overflow-x: auto; padding: 14px 0 4px; font-family: sans-serif; }
-        .diagram-header { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
-        .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 12px sans-serif; }
+        .diagram h2 { margin: 0 0 10px; font-size: 17px; }
+        .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 14px sans-serif; }
         .diagram-grid { min-width: 500px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto auto minmax(58px, auto) auto auto auto; align-items: center; gap: 0 16px; }
         .zone { position: relative; z-index: 3; align-self: stretch; padding: 14px; background: transparent; border: 1px solid var(--line); border-radius: 9px; pointer-events: none; }
         .zone-title { position: absolute; top: 10px; left: 14px; margin: 0; padding: 2px 6px; border-radius: 4px; font-size: 14px; line-height: 1.4; color: var(--muted); white-space: nowrap; }
@@ -123,7 +123,7 @@
             <ul id="nextChecksList" class="next-checks-list"></ul>
         </div>
         <section id="diagram" class="diagram" aria-live="polite">
-            <div class="diagram-header"><strong>検証結果の関係図</strong></div>
+            <h2>検証結果の関係図</h2>
             <div class="apex-summary"><span id="zoneApexSummary">ゾーン頂点：未確認</span></div>
             <div class="diagram-grid">
                 <div class="zone parent-zone"><p id="parentZoneTitle" class="zone-title">親ゾーン / 委任元</p></div>
