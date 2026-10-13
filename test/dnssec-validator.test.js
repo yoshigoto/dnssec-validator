@@ -36,7 +36,13 @@ import {
     toBase32Hex,
     analyzeARecordNodataProof,
     analyzeDsAbsenceProof,
-    createTimeoutGuardedResponder
+    createTimeoutGuardedResponder,
+    isPublicUnicastAddress,
+    queryPublicNameserverUDP,
+    getRateLimitKey,
+    pruneExpiredEntries,
+    validationContext,
+    MAX_NSEC3_ITERATIONS
 } from '../dnssec-validator.js';
 
 function request(server, { method = 'GET', path = '/', body, headers = {} } = {}) {
@@ -1301,4 +1307,390 @@ test('createTimeoutGuardedResponder: タイムアウト後に本処理が完了�
     sendJson(500, { success: false, lateResult: true });
     assert.deepEqual(res.body, { success: false, timedOut: true });
     assert.equal(res.statusCode, 200);
+});
+function makeDelegationFixture(domain = 'child.example.test', parentZone = 'example.test') {
+    const parentKey = makeSigningKey(15, 257);
+    const childKsk = makeSigningKey(15, 257);
+    const childZsk = makeSigningKey(15, 256);
+    const parentDnskey = { name: parentZone, type: 'DNSKEY', data: parentKey.data };
+    const childDnskeys = [
+        { name: domain, type: 'DNSKEY', data: childKsk.data },
+        { name: domain, type: 'DNSKEY', data: childZsk.data }
+    ];
+    const dsRecord = { name: domain, type: 'DS', data: makeDsForDnskey(domain, childKsk.data) };
+    const addressRecord = { name: domain, type: 'A', data: '192.0.2.44' };
+    return {
+        domain, parentZone, parentKey, childKsk, childZsk, parentDnskey, childDnskeys, dsRecord, addressRecord,
+        dnskeySignature: makeSignedRrsig(domain, domain, 'DNSKEY', childDnskeys, childKsk),
+        addressSignature: makeSignedRrsig(domain, domain, 'A', [addressRecord], childZsk)
+    };
+}
+
+function rrsetResponse(resourceRecords, rrsigRecords = [], extra = {}) {
+    return { rcode: 'NOERROR', resourceRecords, rrsigRecords, denialRecords: [], denialRrsigRecords: [], ...extra };
+}
+
+async function withValidationDependencies(dependencies, callback) {
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    app.locals.dnssecValidationDependencies = {
+        compareAuthorityRecordSets: async (zone, nameservers, recordType) => ({ recordType, complete: true, consistent: true, hasDifferences: false, servers: [] }),
+        diagnoseDsProposals: async () => ({ parentDs: [], cds: null, cdnskey: null, notes: [] }),
+        ...dependencies
+    };
+    const server = app.listen(0, '127.0.0.1');
+    try {
+        await once(server, 'listening');
+        return await callback(server);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
+        await new Promise(resolve => server.close(resolve));
+    }
+}
+
+function postValidate(server, domain, clientIp) {
+    return request(server, {
+        method: 'POST',
+        path: '/api/validate',
+        headers: { 'Content-Type': 'application/json', ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}) },
+        body: JSON.stringify({ domain })
+    });
+}
+
+test('親にDSがない場合に子ゾーンの自己署名DSを信頼せず、子サーバーへDSを問い合わせない', async () => {
+    const fixture = makeDelegationFixture();
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const selfSignedDsSignature = makeSignedRrsig(fixture.domain, fixture.domain, 'DS', [fixture.dsRecord], fixture.childKsk);
+    const dsQueriedServers = [];
+    await withValidationDependencies({
+        getZoneApex: async () => ({
+            zoneApex: fixture.domain,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') {
+                dsQueriedServers.push(serverIp);
+                return serverIp === parentIp ? rrsetResponse([]) : rrsetResponse([fixture.dsRecord], [selfSignedDsSignature]);
+            }
+            if (recordType === 'DNSKEY') return rrsetResponse(fixture.childDnskeys, [fixture.dnskeySignature]);
+            if (recordType === 'A') return rrsetResponse([fixture.addressRecord], [fixture.addressSignature]);
+            throw new Error(`Unexpected query ${recordType}`);
+        }
+    }, async server => {
+        const result = JSON.parse((await postValidate(server, fixture.domain, '198.51.100.10')).body);
+        assert.notEqual(result.status, 'secure');
+        assert.equal(result.success, false);
+        assert.deepEqual(dsQueriedServers, [parentIp]);
+    });
+});
+
+test('DS RRSIGの署名者が親ゾーンでなければ署名検証に使わない', async () => {
+    const fixture = makeDelegationFixture();
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const selfSignedDsSignature = makeSignedRrsig(fixture.domain, fixture.domain, 'DS', [fixture.dsRecord], fixture.childKsk);
+    await withValidationDependencies({
+        getZoneApex: async () => ({
+            zoneApex: fixture.domain,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') return rrsetResponse([fixture.dsRecord], [selfSignedDsSignature]);
+            if (recordType === 'DNSKEY') return rrsetResponse(fixture.childDnskeys, [fixture.dnskeySignature]);
+            if (recordType === 'A') return rrsetResponse([fixture.addressRecord], [fixture.addressSignature]);
+            throw new Error(`Unexpected query ${recordType}`);
+        }
+    }, async server => {
+        const result = JSON.parse((await postValidate(server, fixture.domain, '198.51.100.11')).body);
+        assert.equal(result.diagram.checks.dsSignature, false);
+        assert.notEqual(result.status, 'secure');
+        assert.match(result.logs.join('\n'), /署名者.*親ゾーンではない/);
+    });
+});
+
+test('子ゾーンのRRSIG署名者がゾーン頂点と異なる場合は検証成功としない', async () => {
+    const fixture = makeDelegationFixture();
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const dsSignature = makeSignedRrsig(fixture.domain, fixture.parentZone, 'DS', [fixture.dsRecord], fixture.parentKey);
+    const foreignSignerAddressSignature = makeSignedRrsig(fixture.domain, 'other.test', 'A', [fixture.addressRecord], fixture.childZsk);
+    await withValidationDependencies({
+        getZoneApex: async () => ({
+            zoneApex: fixture.domain,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') return rrsetResponse([fixture.dsRecord], [dsSignature]);
+            if (recordType === 'DNSKEY' && serverIp === parentIp) return rrsetResponse([fixture.parentDnskey]);
+            if (recordType === 'DNSKEY') return rrsetResponse(fixture.childDnskeys, [fixture.dnskeySignature]);
+            if (recordType === 'A') return rrsetResponse([fixture.addressRecord], [foreignSignerAddressSignature]);
+            throw new Error(`Unexpected query ${recordType}`);
+        }
+    }, async server => {
+        const result = JSON.parse((await postValidate(server, fixture.domain, '198.51.100.12')).body);
+        assert.equal(result.diagram.checks.dsSignature, true);
+        assert.equal(result.status, 'bogus');
+        assert.match(result.diagram.child.aRecordValidation.signatures[0].reason, /署名者/);
+    });
+});
+
+test('Zone Keyビットがない鍵や失効した鍵ではRRSIGを検証しない', () => {
+    for (const [flags, expected] of [[256, true], [256 | 0x0080, false], [0, false]]) {
+        const key = makeSigningKey(15, flags);
+        const record = { name: 'example.test', type: 'A', data: '192.0.2.1' };
+        const rrsig = makeSignedRrsig('example.test', 'example.test', 'A', [record], key);
+        assert.equal(verifyRecordRrsig([record], rrsig, { data: key.data }, 'example.test').verified, expected, `flags ${flags}`);
+    }
+});
+
+test('上限を超える長さのRSA鍵は検証前に拒否する', () => {
+    const modulus = Buffer.alloc(600, 0xff);
+    const keyData = { flags: 256, protocol: 3, algorithm: 8, key: Buffer.concat([Buffer.from([3, 1, 0, 1]), modulus]) };
+    const keyTag = calculateKeyTag(8, buildDnskeyFullRdata(keyData));
+    const now = Math.floor(Date.now() / 1000);
+    const rrsig = { name: 'example.test', type: 'RRSIG', data: { typeCovered: 'A', algorithm: 8, labels: 2, originalTTL: 300, expiration: now + 60, inception: now - 60, keyTag, signersName: 'example.test', signature: Buffer.alloc(600) } };
+    const result = verifyRecordRrsig([{ name: 'example.test', type: 'A', data: '192.0.2.1' }], rrsig, { data: keyData }, 'example.test');
+    assert.equal(result.verified, false);
+    assert.match(result.reason, /鍵長/);
+});
+
+test('NSEC3の反復回数が上限を超える場合はハッシュ計算せず不在証明に使わない', () => {
+    assert.throws(() => nsec3Hash('example.test', Buffer.alloc(0), MAX_NSEC3_ITERATIONS + 1), RangeError);
+    const domain = 'child.example.test';
+    const record = {
+        name: `${toBase32Hex(Buffer.alloc(20))}.example.test`, type: 'NSEC3',
+        data: { algorithm: 1, flags: 1, iterations: 65535, salt: Buffer.alloc(0), nextDomain: Buffer.alloc(20, 255), rrtypes: ['NS'] }
+    };
+    const started = Date.now();
+    const result = analyzeDsAbsenceProof(domain, [record]);
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(result.records.length, 0);
+    assert.match(result.diagnostics.join('\n'), /RFC 9276/);
+    assert.equal(analyzeRecordNodataProof(domain, 'A', [record]).record, null);
+});
+
+test('多数のラベルとNSEC3パラメーターによるNXDOMAIN解析は計算回数の上限で打ち切る', () => {
+    const domain = `${'a.'.repeat(120)}example.test`;
+    const records = Array.from({ length: 64 }, (_, index) => ({
+        name: `${toBase32Hex(crypto.randomBytes(20))}.example.test`, type: 'NSEC3',
+        data: { algorithm: 1, flags: 0, iterations: MAX_NSEC3_ITERATIONS, salt: Buffer.from([index]), nextDomain: crypto.randomBytes(20), rrtypes: [] }
+    }));
+    const started = Date.now();
+    const result = findNxDomainProof(domain, records);
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+    assert.equal(result.records.length, 0);
+    assert.match(result.diagnostics.join('\n'), /上限/);
+});
+
+test('内部・特殊用途アドレスのネームサーバーには問い合わせない', async () => {
+    for (const address of ['10.0.0.53', '127.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '100.64.0.1', '::1', 'fd00::1', 'fe80::1', '::ffff:10.0.0.1', '0.0.0.0', 'not-an-ip']) {
+        assert.equal(isPublicUnicastAddress(address), false, address);
+    }
+    for (const address of ['198.41.0.4', '8.8.8.8', '2001:500:2::c']) {
+        assert.equal(isPublicUnicastAddress(address), true, address);
+    }
+    const blocked = await queryPublicNameserverUDP('example.test', '10.0.0.53', new Map(), 'SOA', {});
+    assert.equal(blocked.error, 'BLOCKED_ADDRESS');
+    await assert.rejects(getResourceRecord('example.test', '127.0.0.1', 'DS'), /BLOCKED_ADDRESS/);
+});
+
+test('問い合わせ名の上位ではないSOA所有者名をゾーン頂点として採用しない', async () => {
+    const result = await getZoneApex('www.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (domain, serverIp) => serverIp === '192.0.2.1'
+            ? {
+                rcode: 'NOERROR', flags: 0,
+                authorities: [{ name: 'example.test', type: 'NS', data: 'ns.example.test' }],
+                additionals: [{ name: 'ns.example.test', type: 'A', data: '192.0.2.2' }]
+            }
+            : { rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER, answers: [{ name: 'corp.internal', type: 'SOA', data: {} }] }
+    });
+    assert.equal(result.zoneApex, 'example.test');
+    assert.match(result.discoveryError, /SOA の所有者名 \[corp.internal\]/);
+});
+
+test('問い合わせ名と無関係な referral を辿らない', async () => {
+    await assert.rejects(getZoneApex('www.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async () => ({ rcode: 'NOERROR', flags: 0, authorities: [{ name: 'other.test', type: 'NS', data: 'ns.other.test' }] })
+    }), /無関係な委任/);
+
+    const queried = [];
+    const result = await getZoneApex('www.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (domain, serverIp) => {
+            queried.push(serverIp);
+            return serverIp === '192.0.2.1'
+                ? {
+                    rcode: 'NOERROR', flags: 0,
+                    authorities: [{ name: 'example.test', type: 'NS', data: 'ns.example.test' }],
+                    additionals: [{ name: 'ns.example.test', type: 'A', data: '192.0.2.2' }]
+                }
+                : { rcode: 'NOERROR', flags: 0, authorities: [{ name: 'test', type: 'NS', data: 'ns.evil.test' }] };
+        }
+    });
+    assert.deepEqual(queried, ['192.0.2.1', '192.0.2.2']);
+    assert.equal(result.zoneApex, 'example.test');
+    assert.match(result.discoveryError, /無関係な委任 \[test\]/);
+});
+
+test('DNSKEY RRsetの件数・RRSIGの件数・所有者名を制限する', async () => {
+    const manyKeys = Array.from({ length: 33 }, () => ({ name: 'example.test', type: 'DNSKEY', data: makeDnskeyData() }));
+    await assert.rejects(getResourceRecord('example.test', '192.0.2.3', 'DNSKEY', {
+        queryDirectlyUDP: async () => ({ rcode: 'NOERROR', answers: manyKeys, authorities: [] })
+    }), /DNSKEY RRsetが多すぎます/);
+
+    const signatures = Array.from({ length: 20 }, () => ({ name: 'example.test', type: 'RRSIG', data: { typeCovered: 'A' } }));
+    const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
+        queryDirectlyUDP: async () => ({
+            rcode: 'NOERROR',
+            answers: [
+                { name: 'example.test', type: 'A', data: '192.0.2.10' },
+                { name: 'other.test', type: 'A', data: '192.0.2.11' },
+                ...signatures
+            ],
+            authorities: []
+        })
+    });
+    assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
+    assert.equal(result.rrsigRecords.length, 8);
+});
+
+test('レート制限キーはIPv6を/64単位、IPv4射影アドレスをIPv4として集計する', () => {
+    assert.equal(getRateLimitKey('2001:db8:1:2:3:4:5:6'), getRateLimitKey('2001:db8:1:2::ffff'));
+    assert.notEqual(getRateLimitKey('2001:db8:1:2::1'), getRateLimitKey('2001:db8:1:3::1'));
+    assert.equal(getRateLimitKey('2001:db8::1'), '2001:db8:0:0::/64');
+    assert.equal(getRateLimitKey('::ffff:203.0.113.5'), '203.0.113.5');
+    assert.equal(getRateLimitKey('203.0.113.5'), '203.0.113.5');
+});
+
+test('ループバックのリバースプロキシが付与したX-Forwarded-Forでクライアントごとにレート制限する', async () => {
+    let validations = 0;
+    await withValidationDependencies({
+        getZoneApex: async () => {
+            validations++;
+            return { zoneApex: '', hasCnameOrDname: true };
+        }
+    }, async server => {
+        for (let count = 0; count < 60; count++) {
+            assert.equal((await postValidate(server, 'example.test', '198.51.100.20')).statusCode, 200);
+        }
+        assert.equal((await postValidate(server, 'example.test', '198.51.100.20')).statusCode, 429);
+        assert.equal((await postValidate(server, 'example.test', '198.51.100.21')).statusCode, 200);
+        assert.equal(validations, 61);
+    });
+});
+
+test('予期しないエラーの詳細を応答に含めない', async t => {
+    t.mock.method(console, 'error', () => {});
+    await withValidationDependencies({
+        getZoneApex: async () => { throw new Error('secret internal detail'); }
+    }, async server => {
+        const response = await postValidate(server, 'example.test', '198.51.100.30');
+        assert.equal(response.statusCode, 500);
+        assert.doesNotMatch(response.body, /secret internal detail/);
+    });
+});
+
+test('JSON以外の本文やオブジェクト以外のJSONは400を返す', async () => {
+    const server = app.listen(0, '127.0.0.1');
+    try {
+        await once(server, 'listening');
+        for (const [contentType, body] of [['text/plain', 'example.test'], ['application/json', '["example.test"]']]) {
+            const response = await request(server, {
+                method: 'POST', path: '/api/validate',
+                headers: { 'Content-Type': contentType, 'X-Forwarded-For': '198.51.100.40' },
+                body
+            });
+            assert.equal(response.statusCode, 400, contentType);
+        }
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('同時実行数の上限を超える検証要求は503を返す', async () => {
+    let started = 0;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    await withValidationDependencies({
+        getZoneApex: async () => {
+            started++;
+            await gate;
+            return { zoneApex: '', hasCnameOrDname: true };
+        }
+    }, async server => {
+        const pending = Array.from({ length: 16 }, (_, index) => postValidate(server, 'example.test', `198.51.100.${100 + index}`));
+        while (started < 16) await new Promise(resolve => setTimeout(resolve, 5));
+        const rejected = await postValidate(server, 'example.test', '198.51.100.200');
+        assert.equal(rejected.statusCode, 503);
+        assert.ok(rejected.headers['retry-after']);
+        release();
+        for (const response of await Promise.all(pending)) assert.equal(response.statusCode, 200);
+        assert.equal((await postValidate(server, 'example.test', '198.51.100.201')).statusCode, 200);
+    });
+});
+
+test('期限切れのレート制限・DNS応答キャッシュを掃除する', () => {
+    const now = Date.now() + 10 * 60000;
+    checkRateLimit('stale-client');
+    pruneExpiredEntries(now);
+    assert.equal(checkRateLimit('stale-client').remaining, 59);
+});
+
+test('DS RRsetの件数を制限する', async () => {
+    const dsRecord = { name: 'example.test', type: 'DS', data: makeDsForDnskey('example.test', makeDnskeyData()) };
+    await assert.rejects(getResourceRecord('example.test', '192.0.2.3', 'DS', {
+        queryDirectlyUDP: async () => ({ rcode: 'NOERROR', answers: Array.from({ length: 17 }, () => dsRecord), authorities: [] })
+    }), /DS RRsetが多すぎます/);
+});
+
+test('1クライアントの同時実行数を制限し、他のクライアントは処理を続けられる', async () => {
+    let started = 0;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    await withValidationDependencies({
+        getZoneApex: async () => {
+            started++;
+            await gate;
+            return { zoneApex: '', hasCnameOrDname: true };
+        }
+    }, async server => {
+        const pending = [postValidate(server, 'example.test', '198.51.100.60'), postValidate(server, 'example.test', '198.51.100.60')];
+        while (started < 2) await new Promise(resolve => setTimeout(resolve, 5));
+        const rejected = await postValidate(server, 'example.test', '198.51.100.60');
+        assert.equal(rejected.statusCode, 429);
+        assert.match(JSON.parse(rejected.body).error, /同時に実行できる検証/);
+        const otherClient = postValidate(server, 'example.test', '198.51.100.61');
+        while (started < 3) await new Promise(resolve => setTimeout(resolve, 5));
+        release();
+        for (const response of await Promise.all([...pending, otherClient])) assert.equal(response.statusCode, 200);
+    });
+});
+
+test('制限時間を超えて中断された検証は以降のDNS問い合わせを送信しない', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await validationContext.run({ signal: controller.signal }, () =>
+        queryPublicNameserverUDP('example.test', '198.41.0.4', new Map(), 'SOA'));
+    assert.equal(result.error, 'ABORTED');
 });
