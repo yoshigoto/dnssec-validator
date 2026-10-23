@@ -161,7 +161,7 @@ function encodeTestRdata(type, data) {
         header.writeUInt16BE(data.port, 4);
         return Buffer.concat([header, encodeTestDnsName(data.target)]);
     }
-    if (type === 'NSEC3') return dnsPacket.record(type).encode(data).subarray(2);
+    if (type === 'NSEC' || type === 'NSEC3') return dnsPacket.record(type).encode(data).subarray(2);
     if (type === 'DNSKEY') return buildDnskeyFullRdata(data);
     if (type === 'DS') {
         const rdata = Buffer.alloc(4 + data.digest.length);
@@ -174,8 +174,8 @@ function encodeTestRdata(type, data) {
     throw new Error(`Unsupported test RR type: ${type}`);
 }
 
-function makeSignedRrsig(owner, signerName, type, records, signingKey) {
-    const typeCode = { A: 1, NS: 2, CNAME: 5, MX: 15, TXT: 16, AAAA: 28, SRV: 33, DS: 43, DNSKEY: 48, NSEC3: 50, CAA: 257 }[type];
+function makeSignedRrsig(owner, signerName, type, records, signingKey, overrides = {}) {
+    const typeCode = { A: 1, NS: 2, CNAME: 5, MX: 15, TXT: 16, AAAA: 28, SRV: 33, DS: 43, NSEC: 47, DNSKEY: 48, NSEC3: 50, CAA: 257 }[type];
     const fullKeyRdata = buildDnskeyFullRdata(signingKey.data);
     const now = Math.floor(Date.now() / 1000);
     const data = {
@@ -186,7 +186,8 @@ function makeSignedRrsig(owner, signerName, type, records, signingKey) {
         expiration: now + 3600,
         inception: now - 60,
         keyTag: calculateKeyTag(signingKey.data.algorithm, fullKeyRdata),
-        signersName: signerName
+        signersName: signerName,
+        ...overrides
     };
     const signatureHeader = Buffer.alloc(18);
     signatureHeader.writeUInt16BE(typeCode, 0);
@@ -206,7 +207,7 @@ function makeSignedRrsig(owner, signerName, type, records, signingKey) {
         rrHeader.writeUInt16BE(rdata.length, 8);
         return Buffer.concat([ownerName, rrHeader, rdata]);
     });
-    const signedData = Buffer.concat([signatureHeader, encodeTestDnsName(signerName), ...rrsetWire]);
+    const signedData = Buffer.concat([signatureHeader, encodeTestDnsName(data.signersName), ...rrsetWire]);
     return { name: owner, type: 'RRSIG', data: { ...data, signature: signingKey.sign(signedData) } };
 }
 
@@ -1558,6 +1559,178 @@ for (const fixture of recordTypeFixtures) {
             }
         });
     });
+}
+
+function makeTargetDenialRecords(proofType, rcode, domain, zone, recordType) {
+    const rrtypes = ['RRSIG', proofType, ...(recordType === 'A' ? ['AAAA'] : ['A'])];
+    if (proofType === 'NSEC') {
+        return rcode === 'NOERROR'
+            ? [{ name: domain, type: proofType, ttl: 300, data: { nextDomain: `z.${zone}`, rrtypes } }]
+            : [
+                { name: zone, type: proofType, ttl: 300, data: { nextDomain: `a.${zone}`, rrtypes: ['SOA', 'NS', 'RRSIG', 'NSEC'] } },
+                { name: `a.${zone}`, type: proofType, ttl: 300, data: { nextDomain: `z.${zone}`, rrtypes: ['A', 'RRSIG', 'NSEC'] } }
+            ];
+    }
+    const salt = Buffer.from('a1b2', 'hex');
+    const iterations = 1;
+    const names = rcode === 'NOERROR' ? [domain] : [zone, `a.${zone}`, `z.${zone}`];
+    const hashes = names.map(name => nsec3Hash(name, salt, iterations)).sort(Buffer.compare);
+    return hashes.map((hash, index) => ({
+        name: `${toBase32Hex(hash)}.${zone}`, type: proofType, ttl: 300,
+        data: {
+            algorithm: 1, flags: 0, salt, iterations,
+            nextDomain: hashes[(index + 1) % hashes.length],
+            rrtypes: rcode === 'NOERROR' ? rrtypes : ['SOA', 'NS', 'RRSIG']
+        }
+    }));
+}
+
+for (const proofType of ['NSEC', 'NSEC3']) {
+    const cases = [
+        ...recordTypeFixtures.map(({ type }) => ({ recordType: type, rcode: 'NOERROR' })),
+        { recordType: 'A', rcode: 'NXDOMAIN' }
+    ];
+    for (const [caseIndex, { recordType, rcode }] of cases.entries()) {
+        test(`${proofType}の${recordType} ${rcode === 'NOERROR' ? 'NODATA' : 'NXDOMAIN'}不在証明をAPIで検証し、不正・不足を拒否する`, async t => {
+            const nowMs = Date.now();
+            t.mock.method(Date, 'now', () => nowMs);
+            const now = Math.floor(nowMs / 1000);
+            const chain = makeDelegationFixture();
+            const domain = `missing.${chain.domain}`;
+            const parentIp = '192.0.2.1';
+            const childIp = '192.0.2.2';
+            const records = makeTargetDenialRecords(proofType, rcode, domain, chain.domain, recordType);
+            const sign = (record, overrides = {}) => makeSignedRrsig(
+                record.name, chain.domain, record.type, [record], chain.childZsk, overrides
+            );
+            const signatures = records.map(record => sign(record));
+            const unrelatedKey = makeSigningKey(15);
+            const dsSignature = makeSignedRrsig(chain.domain, chain.parentZone, 'DS', [chain.dsRecord], chain.parentKey);
+            const requiredRecords = rcode === 'NOERROR' ? records : [...new Set(findNxDomainProof(domain, records).records)];
+            assert.ok(requiredRecords.length > 0);
+            const scenarios = [
+                { name: 'valid', records, signatures, valid: true },
+                { name: 'no-proof', records: [], signatures: [] }
+            ];
+            for (const record of requiredRecords) {
+                const index = records.indexOf(record);
+                const corrupted = { ...signatures[index], data: {
+                    ...signatures[index].data, signature: Buffer.from(signatures[index].data.signature)
+                } };
+                corrupted.data.signature[0] ^= 1;
+                for (const [fault, replacement] of [
+                    ['bad-signature', corrupted],
+                    ['expired', sign(record, { inception: now - 3600, expiration: now - 1 })],
+                    ['not-yet-valid', sign(record, { inception: now + 60, expiration: now + 3600 })],
+                    ['wrong-signer', sign(record, { signersName: 'other.example.test' })],
+                    ['unknown-key', makeSignedRrsig(record.name, chain.domain, record.type, [record], unrelatedKey)]
+                ]) {
+                    scenarios.push({
+                        name: `${fault}-${index}`, records,
+                        signatures: signatures.map((signature, signatureIndex) => signatureIndex === index ? replacement : signature)
+                    });
+                }
+                scenarios.push(
+                    { name: `missing-signature-${index}`, records, signatures: signatures.filter((_, signatureIndex) => signatureIndex !== index) },
+                    { name: `missing-record-${index}`, records: records.filter(candidate => candidate !== record), signatures },
+                    {
+                        name: `rdata-tampered-${index}`, signatures,
+                        records: records.map(candidate => candidate === record
+                            ? { ...record, data: { ...record.data, rrtypes: [...record.data.rrtypes, rcode === 'NOERROR' ? 'SOA' : 'TXT'] } }
+                            : candidate)
+                    }
+                );
+            }
+            if (rcode === 'NOERROR') {
+                const bitmapRecord = { ...records[0], data: { ...records[0].data, rrtypes: [...records[0].data.rrtypes, recordType] } };
+                scenarios.push({ name: 'type-present', records: [bitmapRecord], signatures: [sign(bitmapRecord)] });
+            }
+            let targetResponse;
+            let targetQueries = 0;
+            await withValidationDependencies({
+                getZoneApex: async name => {
+                    assert.equal(name, domain);
+                    return {
+                        zoneApex: chain.domain, parentNs: 'ns.example.test', currentNs: 'ns.child.example.test',
+                        parentNameservers: ['ns.example.test'], childNameservers: ['ns.child.example.test'],
+                        rcode, hasCnameOrDname: false
+                    };
+                },
+                getARecord: async name => {
+                    assert.ok(['ns.example.test', 'ns.child.example.test'].includes(name));
+                    return name === 'ns.example.test' ? parentIp : childIp;
+                },
+                getResourceRecord: (name, ip, type) => getResourceRecord(name, ip, type, {
+                    queryDirectlyUDP: async (queryName, serverIp, cache, queryType, options) => {
+                        assert.deepEqual(options, { useEdns: true, dnssecOk: true });
+                        let response;
+                        if (serverIp === parentIp && queryType === 'DS') {
+                            assert.equal(queryName, chain.domain);
+                            response = { answers: [chain.dsRecord, dsSignature] };
+                        } else if (queryType === 'DNSKEY') {
+                            assert.equal(queryName, serverIp === parentIp ? chain.parentZone : chain.domain);
+                            response = { answers: serverIp === parentIp ? [chain.parentDnskey] : [...chain.childDnskeys, chain.dnskeySignature] };
+                        } else {
+                            assert.equal(queryName, domain);
+                            assert.equal(serverIp, childIp);
+                            assert.equal(queryType, recordType);
+                            targetQueries++;
+                            response = targetResponse;
+                        }
+                        return dnsPacket.decode(dnsPacket.encode({
+                            type: 'response', id: 1, flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                            ...response
+                        }));
+                    }
+                })
+            }, async server => {
+                for (const scenario of scenarios) {
+                    targetResponse = {
+                        flags: dnsPacket.AUTHORITATIVE_ANSWER | (rcode === 'NXDOMAIN' ? 3 : 0),
+                        answers: [], authorities: [...scenario.records, ...scenario.signatures]
+                    };
+                    const response = await request(server, {
+                        method: 'POST', path: '/api/validate',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Forwarded-For': `198.51.100.${100 + caseIndex + (proofType === 'NSEC3' ? 10 : 0)}`
+                        },
+                        body: JSON.stringify({ domain, recordType })
+                    });
+                    assert.equal(response.statusCode, 200, scenario.name);
+                    const result = JSON.parse(response.body);
+                    const valid = scenario.valid === true;
+                    assert.equal(result.status, valid ? 'secure' : 'bogus', scenario.name);
+                    assert.equal(result.success, valid, scenario.name);
+                    assert.deepEqual(result.diagram.checks, { dsSignature: true, dnskeySignature: true, dsKeyMatch: true });
+                    const validation = result.diagram.child.aRecordValidation;
+                    assert.equal(validation.recordType, recordType);
+                    assert.equal(validation.queried, true);
+                    assert.equal(validation.recordsFound, false);
+                    assert.ok(!validation.error, validation.error);
+                    assert.deepEqual(validation.signatures, []);
+                    assert.equal(validation.trustChain.dnskeyRrsetSignatures.length, 1);
+                    const proof = validation.denialProof;
+                    assert.equal(proof.rcode, rcode, scenario.name);
+                    assert.equal(proof.verified, valid, scenario.name);
+                    if (valid || /bad-signature|expired|not-yet-valid|wrong-signer|unknown-key|missing-signature|rdata-tampered/.test(scenario.name)) {
+                        assert.equal(proof.type, proofType);
+                        assert.deepEqual(proof.records.map(record => record.name),
+                            (rcode === 'NOERROR' ? records : findNxDomainProof(domain, records).records).map(record => record.name));
+                    }
+                    if (valid) {
+                        assert.ok(proof.records.every(record => record.expiration === now + 3600));
+                        assert.deepEqual(proof.diagnostics, []);
+                    }
+                    if (scenario.name === 'type-present') {
+                        assert.match(proof.diagnostics.join('\n'), new RegExp(`type bitmapに${recordType}`));
+                    }
+                    if (!valid) assert.match(result.logs.join('\n'), /署名または不在証明の検証に失敗/);
+                }
+                assert.equal(targetQueries, scenarios.length);
+            });
+        });
+    }
 }
 
 test('親にDSがない場合に子ゾーンの自己署名DSを信頼せず、子サーバーへDSを問い合わせない', async () => {
