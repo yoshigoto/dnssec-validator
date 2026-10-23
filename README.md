@@ -84,7 +84,15 @@ npm test
 
 VS Code では WSL 拡張機能でこのフォルダーを開くと、統合ターミナル、起動設定、テスト設定が Ubuntu 側で実行されます。
 
-テスト本体は `test/dnssec-validator.test.js` にあります。実際の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
+単体テストと API テストは `test/dnssec-validator.test.js`、実際の `dns-self-resolver` を使う結合テストは `test/resolver-integration.test.js` にあります。結合テストはループバック上の一時ポートで模擬 DNS サーバーを起動し、EDNS/DO ビット、DS/DNSKEY/RRSIG/NSEC3 のデコード、UDP から TCP への切り替え、応答キャッシュの TTL、UDP/TCP のタイムアウトと AbortSignal による中断、委任を辿ったゾーン頂点探索と NS 名の IPv4 自己解決を確認します。問い合わせ先だけをテスト内でローカルへ振り替え、本番の内部アドレスへの通信制限は変更しません。外部 DNS や特権ポートは不要で、`npm test` に含まれます。
+
+結合テストだけを実行する場合:
+
+```bash
+node --test test/resolver-integration.test.js
+```
+
+インターネット上の DNS 応答を使う検証はネットワーク状態に左右されるため、必要に応じてアプリを起動して画面または API から別途確認してください。
 
 dnssec-check.jp の掲載ドメインを起動済みの API で一括検証する場合:
 
