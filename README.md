@@ -82,6 +82,8 @@ location / {
 npm test
 ```
 
+対応する A / AAAA / CNAME / MX / NS / TXT / CAA / SRV の全8種について、全対応署名アルゴリズムでの署名検証、RRset の並び順・取得時 TTL に依存しないこと、RDATA・署名の改ざん拒否を確認します。署名用の RDATA は `dns-packet` とは独立に組み立てます。API テストではレコード種別の指定・正規化から DNS パケットのエンコード／デコード、RRset 抽出、信頼の連鎖の検証まで通し、正常時の Secure と改ざん時の Bogus を確認します。TXT の複数文字列・空文字列・バイナリー値、MX の優先度、CAA の flags/tag/value、SRV の priority/weight/port/target も対象です。
+
 VS Code では WSL 拡張機能でこのフォルダーを開くと、統合ターミナル、起動設定、テスト設定が Ubuntu 側で実行されます。
 
 単体テストと API テストは `test/dnssec-validator.test.js`、実際の `dns-self-resolver` を使う結合テストは `test/resolver-integration.test.js` にあります。結合テストはループバック上の一時ポートで模擬 DNS サーバーを起動し、EDNS/DO ビット、DS/DNSKEY/RRSIG/NSEC3 のデコード、UDP から TCP への切り替え、応答キャッシュの TTL、UDP/TCP のタイムアウトと AbortSignal による中断、委任を辿ったゾーン頂点探索と NS 名の IPv4 自己解決を確認します。問い合わせ先だけをテスト内でローカルへ振り替え、本番の内部アドレスへの通信制限は変更しません。外部 DNS や特権ポートは不要で、`npm test` に含まれます。

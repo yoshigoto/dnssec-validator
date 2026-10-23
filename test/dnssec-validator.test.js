@@ -134,6 +134,33 @@ function encodeTestDnsName(name) {
 
 function encodeTestRdata(type, data) {
     if (type === 'A') return Buffer.from(data.split('.').map(Number));
+    if (type === 'AAAA') {
+        const rdata = Buffer.alloc(16);
+        data.split(':').forEach((part, index) => rdata.writeUInt16BE(parseInt(part, 16), index * 2));
+        return rdata;
+    }
+    if (type === 'CNAME' || type === 'NS') return encodeTestDnsName(data);
+    if (type === 'MX') {
+        const preference = Buffer.alloc(2);
+        preference.writeUInt16BE(data.preference);
+        return Buffer.concat([preference, encodeTestDnsName(data.exchange)]);
+    }
+    if (type === 'TXT') {
+        return Buffer.concat(data.map(chunk => Buffer.concat([Buffer.from([chunk.length]), chunk])));
+    }
+    if (type === 'CAA') {
+        return Buffer.concat([
+            Buffer.from([data.flags, Buffer.byteLength(data.tag)]),
+            Buffer.from(data.tag), Buffer.from(data.value)
+        ]);
+    }
+    if (type === 'SRV') {
+        const header = Buffer.alloc(6);
+        header.writeUInt16BE(data.priority, 0);
+        header.writeUInt16BE(data.weight, 2);
+        header.writeUInt16BE(data.port, 4);
+        return Buffer.concat([header, encodeTestDnsName(data.target)]);
+    }
     if (type === 'NSEC3') return dnsPacket.record(type).encode(data).subarray(2);
     if (type === 'DNSKEY') return buildDnskeyFullRdata(data);
     if (type === 'DS') {
@@ -148,7 +175,7 @@ function encodeTestRdata(type, data) {
 }
 
 function makeSignedRrsig(owner, signerName, type, records, signingKey) {
-    const typeCode = { A: 1, DS: 43, DNSKEY: 48, NSEC3: 50 }[type];
+    const typeCode = { A: 1, NS: 2, CNAME: 5, MX: 15, TXT: 16, AAAA: 28, SRV: 33, DS: 43, DNSKEY: 48, NSEC3: 50, CAA: 257 }[type];
     const fullKeyRdata = buildDnskeyFullRdata(signingKey.data);
     const now = Math.floor(Date.now() / 1000);
     const data = {
@@ -181,6 +208,91 @@ function makeSignedRrsig(owner, signerName, type, records, signingKey) {
     });
     const signedData = Buffer.concat([signatureHeader, encodeTestDnsName(signerName), ...rrsetWire]);
     return { name: owner, type: 'RRSIG', data: { ...data, signature: signingKey.sign(signedData) } };
+}
+
+const recordTypeFixtures = [
+    {
+        type: 'A',
+        data: ['192.0.2.44', '192.0.2.45'],
+        tampered: ['192.0.2.46']
+    },
+    {
+        type: 'AAAA',
+        data: ['2001:db8:0:0:0:0:0:44', '2001:db8:0:0:0:0:0:45'],
+        tampered: ['2001:db8:0:0:0:0:0:46']
+    },
+    {
+        type: 'CNAME',
+        data: ['alias.example.test'],
+        tampered: ['other.example.test']
+    },
+    {
+        type: 'MX',
+        data: [{ preference: 10, exchange: 'mail.example.test' }, { preference: 20, exchange: 'backup.example.test' }],
+        tampered: [{ preference: 11, exchange: 'mail.example.test' }, { preference: 10, exchange: 'other.example.test' }]
+    },
+    {
+        type: 'NS',
+        data: ['ns1.example.test', 'ns2.example.test'],
+        tampered: ['ns3.example.test']
+    },
+    {
+        type: 'TXT',
+        data: [[Buffer.from('v=spf1 '), Buffer.from('-all')], [Buffer.alloc(0), Buffer.from([0, 127, 255])]],
+        tampered: [
+            [Buffer.from('v=spf1 '), Buffer.from('~all')],
+            [Buffer.from('v=spf1 -all')],
+            [Buffer.from('-all'), Buffer.from('v=spf1 ')]
+        ]
+    },
+    {
+        type: 'CAA',
+        data: [{ flags: 0, tag: 'issue', value: 'ca.example.test' }, { flags: 128, tag: 'iodef', value: 'mailto:admin@example.test' }],
+        tampered: [
+            { flags: 128, tag: 'issue', value: 'ca.example.test' },
+            { flags: 0, tag: 'issuewild', value: 'ca.example.test' },
+            { flags: 0, tag: 'issue', value: 'other.example.test' }
+        ]
+    },
+    {
+        type: 'SRV',
+        data: [{ priority: 10, weight: 20, port: 443, target: 'service.example.test' }, { priority: 30, weight: 40, port: 8443, target: 'backup.example.test' }],
+        tampered: [
+            { priority: 11, weight: 20, port: 443, target: 'service.example.test' },
+            { priority: 10, weight: 21, port: 443, target: 'service.example.test' },
+            { priority: 10, weight: 20, port: 444, target: 'service.example.test' },
+            { priority: 10, weight: 20, port: 443, target: 'other.example.test' }
+        ]
+    }
+];
+
+for (const fixture of recordTypeFixtures) {
+    test(`${fixture.type}のRRSIGを全対応アルゴリズムで検証し、RDATAと署名の改ざんを拒否する`, () => {
+        const domain = 'host.child.example.test';
+        const records = fixture.data.map(data => ({ name: domain, type: fixture.type, ttl: 60, data }));
+        for (const algorithm of [5, 7, 8, 10, 13, 14, 15, 16, 18]) {
+            const signingKey = makeSigningKey(algorithm);
+            const dnskey = { name: 'child.example.test', type: 'DNSKEY', data: signingKey.data };
+            // Sign independently of dns-packet so encoder changes cannot change both sides of the test.
+            const signature = makeSignedRrsig(domain, dnskey.name, fixture.type, records, signingKey);
+            const verify = (rrset, rrsig = signature) => verifyRecordRrsig(rrset, rrsig, dnskey, domain).verified;
+            assert.equal(verify(records), true, `algorithm ${algorithm}`);
+            assert.equal(verify([...records].reverse().map(record => ({ ...record, ttl: 1 }))), true,
+                `algorithm ${algorithm}: RRset order and current TTL do not affect the signature`);
+            for (const data of fixture.tampered) {
+                assert.equal(verify([{ ...records[0], data }, ...records.slice(1)]), false,
+                    `algorithm ${algorithm}: altered ${fixture.type} RDATA`);
+            }
+            if (records.length > 1) {
+                assert.equal(verify(records.slice(1)), false, `algorithm ${algorithm}: missing RR`);
+            }
+            const corrupted = {
+                ...signature, data: { ...signature.data, signature: Buffer.from(signature.data.signature) }
+            };
+            corrupted.data.signature[0] ^= 1;
+            assert.equal(verify(records, corrupted), false, `algorithm ${algorithm}: altered signature`);
+        }
+    });
 }
 
 test('ドメイン名を検証する', () => {
@@ -1354,6 +1466,97 @@ function postValidate(server, domain, clientIp) {
         path: '/api/validate',
         headers: { 'Content-Type': 'application/json', ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}) },
         body: JSON.stringify({ domain })
+    });
+}
+
+for (const fixture of recordTypeFixtures) {
+    test(`${fixture.type}をAPIで指定してSecureを返し、RDATA・署名の改ざん時はBogusを返す`, async () => {
+        const chain = makeDelegationFixture();
+        const domain = `host.${chain.domain}`;
+        const parentIp = '192.0.2.1';
+        const childIp = '192.0.2.2';
+        const records = fixture.data.map(data => ({ name: domain, type: fixture.type, ttl: 300, data }));
+        const signature = makeSignedRrsig(domain, chain.domain, fixture.type, records, chain.childZsk);
+        const dsSignature = makeSignedRrsig(chain.domain, chain.parentZone, 'DS', [chain.dsRecord], chain.parentKey);
+        let scenario = 'valid';
+        const queries = [];
+        await withValidationDependencies({
+            getZoneApex: async name => {
+                assert.equal(name, domain);
+                return {
+                    zoneApex: chain.domain, parentNs: 'ns.example.test', currentNs: 'ns.child.example.test',
+                    parentNameservers: ['ns.example.test'], childNameservers: ['ns.child.example.test'],
+                    rcode: 'NOERROR', hasCnameOrDname: false
+                };
+            },
+            getARecord: async name => {
+                assert.ok(['ns.example.test', 'ns.child.example.test'].includes(name));
+                return name === 'ns.example.test' ? parentIp : childIp;
+            },
+            getResourceRecord: (name, ip, type) => getResourceRecord(name, ip, type, {
+                queryDirectlyUDP: async (queryName, serverIp, cache, queryType, options) => {
+                    queries.push({ name: queryName, ip: serverIp, type: queryType });
+                    assert.deepEqual(options, { useEdns: true, dnssecOk: true });
+                    let answers;
+                    if (serverIp === parentIp && queryType === 'DS') {
+                        assert.equal(queryName, chain.domain);
+                        answers = [chain.dsRecord, dsSignature];
+                    } else if (queryType === 'DNSKEY') {
+                        assert.equal(queryName, serverIp === parentIp ? chain.parentZone : chain.domain);
+                        answers = serverIp === parentIp ? [chain.parentDnskey] : [...chain.childDnskeys, chain.dnskeySignature];
+                    } else {
+                        assert.equal(serverIp, childIp);
+                        assert.equal(queryName, domain);
+                        assert.equal(queryType, fixture.type);
+                        const returnedRecords = scenario === 'rdata-tampered'
+                            ? [{ ...records[0], data: fixture.tampered[0] }, ...records.slice(1)]
+                            : [...records].reverse();
+                        const returnedSignature = {
+                            ...signature, data: { ...signature.data, signature: Buffer.from(signature.data.signature) }
+                        };
+                        if (scenario === 'signature-tampered') returnedSignature.data.signature[0] ^= 1;
+                        answers = [...returnedRecords, returnedSignature];
+                    }
+                    return dnsPacket.decode(dnsPacket.encode({
+                        type: 'response', id: 1, flags: dnsPacket.AUTHORITATIVE_ANSWER, answers
+                    }));
+                }
+            })
+        }, async server => {
+            for (scenario of ['valid', 'rdata-tampered', 'signature-tampered']) {
+                queries.length = 0;
+                const response = await request(server, {
+                    method: 'POST', path: '/api/validate',
+                    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.80' },
+                    body: JSON.stringify({ domain, recordType: fixture.type.toLowerCase() })
+                });
+                assert.equal(response.statusCode, 200, scenario);
+                assert.match(response.headers['content-type'], /application\/json/);
+                const result = JSON.parse(response.body);
+                const valid = scenario === 'valid';
+                assert.equal(result.success, valid, scenario);
+                assert.equal(result.status, valid ? 'secure' : 'bogus', scenario);
+                assert.equal(typeof result.statusLabel, 'string');
+                assert.ok(Array.isArray(result.nextChecks));
+                assert.ok(Array.isArray(result.logs));
+                assert.deepEqual(result.diagram.checks, { dsSignature: true, dnskeySignature: true, dsKeyMatch: true });
+                const validation = result.diagram.child.aRecordValidation;
+                assert.equal(validation.recordType, fixture.type);
+                assert.equal(validation.queried, true);
+                assert.equal(validation.recordsFound, true);
+                assert.ok(!validation.error, validation.error);
+                assert.equal(validation.signatures.length, 1);
+                assert.equal(validation.signatures[0].verified, valid, scenario);
+                assert.equal(validation.signatures[0].trustChainVerified, valid, scenario);
+                assert.equal(validation.trustChain.dnskeyRrsetSignatures.length, 1);
+                assert.deepEqual(queries, [
+                    { name: chain.domain, ip: parentIp, type: 'DS' },
+                    { name: chain.parentZone, ip: parentIp, type: 'DNSKEY' },
+                    { name: chain.domain, ip: childIp, type: 'DNSKEY' },
+                    { name: domain, ip: childIp, type: fixture.type }
+                ]);
+            }
+        });
     });
 }
 
