@@ -159,7 +159,9 @@ def validate_domain_once(target_url, domain, timeout=30, record_type="A"):
             elapsed = int((time.time() - t0) * 1000)
             return {
                 "status": res.status,
-                "success": data.get("success", False),
+                "success": data.get("success"),
+                "validation_status": data.get("status"),
+                "timed_out": data.get("timedOut", False),
                 "error": data.get("error"),
                 "logs": data.get("logs", []),
                 "elapsed": elapsed
@@ -170,7 +172,9 @@ def validate_domain_once(target_url, domain, timeout=30, record_type="A"):
             data = json.loads(e.read().decode('utf-8'))
             result = {
                 "status": e.code,
-                "success": data.get("success", False),
+                "success": data.get("success"),
+                "validation_status": data.get("status"),
+                "timed_out": data.get("timedOut", False),
                 "error": data.get("error"),
                 "logs": data.get("logs", []),
                 "elapsed": elapsed
@@ -223,7 +227,9 @@ const server = app.listen(0, '127.0.0.1', async () => {
             data = raw.get("data", {})
             return {
                 "status": raw.get("status", 500),
-                "success": data.get("success", False),
+                "success": data.get("success"),
+                "validation_status": data.get("status"),
+                "timed_out": data.get("timedOut", False),
                 "error": data.get("error") or raw.get("error"),
                 "logs": data.get("logs", []),
                 "elapsed": elapsed
@@ -252,7 +258,9 @@ def main():
     results = []
     
     for idx, domain in enumerate(domains, 1):
-        expected_success = domain.startswith("success.") or domain.startswith("www.success.")
+        normalized_domain = domain.lower().rstrip(".")
+        expected_success = normalized_domain.startswith("success.") or normalized_domain.startswith("www.success.")
+        expected_status = "secure" if expected_success else "bogus"
         record_type = record_type_for_domain(domain)
         
         if args.url:
@@ -261,20 +269,30 @@ def main():
             res = run_isolated_validation(domain, project_root, timeout=args.timeout, record_type=record_type)
             
         actual_success = res["success"]
-        is_match = res["status"] == 200 and not res["error"] and actual_success == expected_success
+        actual_status = res.get("validation_status")
+        timed_out = res.get("timed_out", False)
+        is_match = (
+            res["status"] == 200
+            and not res["error"]
+            and timed_out is False
+            and actual_success is expected_success
+            and actual_status == expected_status
+        )
         
         results.append({
             "domain": domain,
             "record_type": record_type,
-            "expected": expected_success,
-            "actual": actual_success,
+            "expected": expected_status,
+            "actual": actual_status,
             "match": is_match,
             "res": res
         })
         
         status_str = "✓ PASSED" if is_match else "✗ FAILED"
-        exp_str = "SUCCESS" if expected_success else "FAILURE"
-        act_str = "SUCCESS" if actual_success else "FAILURE"
+        exp_str = expected_status.upper()
+        act_str = str(actual_status).upper() if actual_status is not None else "MISSING"
+        if timed_out is not False:
+            act_str += " (timedOut=" + str(timed_out) + ")"
         
         print(f"[{idx:2d}/{len(domains)}] {status_str} | {domain:<62s} | {record_type} | 期待:{exp_str:<7s} | 実際:{act_str:<7s} ({res['elapsed']}ms)")
 
@@ -294,6 +312,7 @@ def main():
             if not r["match"]:
                 print(f"- {r['domain']} ({r['record_type']})")
                 print(f"    期待値: {r['expected']} | 実際の判定: {r['actual']} (HTTP Status: {r['res']['status']})")
+                print(f"    success: {r['res']['success']} | timedOut: {r['res'].get('timed_out', False)}")
                 if r['res']['error']:
                     print(f"    Error: {r['res']['error']}")
                 if r['res']['logs']:
@@ -302,7 +321,7 @@ def main():
                         print(f"      - {log}")
         sys.exit(1)
     else:
-        print("\nすべてのドメインで期待通りの成功/失敗判定となりました。")
+        print("\nすべてのドメインで期待通りのDNSSEC状態となりました。")
         sys.exit(0)
 
 if __name__ == "__main__":

@@ -44,7 +44,9 @@ class ValidateAllDomainsTests(unittest.TestCase):
         response = MagicMock()
         response.__enter__.return_value = response
         response.status = 200
-        response.read.return_value = json.dumps({"success": success, "logs": []}).encode()
+        response.read.return_value = json.dumps({
+            "success": success, "status": "secure" if success else "bogus", "logs": []
+        }).encode()
         return response
 
     def test_fallback_includes_all_new_domains_without_duplicates(self):
@@ -102,7 +104,7 @@ class ValidateAllDomainsTests(unittest.TestCase):
                     patch.object(validator.subprocess, "run") as run:
                 run.return_value.returncode = 0
                 run.return_value.stdout = json.dumps({
-                    "status": 200, "data": {"success": False, "logs": []}
+                    "status": 200, "data": {"success": False, "status": "bogus", "logs": []}
                 })
                 domain = "example'test"
                 result = validator.run_isolated_validation(
@@ -117,6 +119,8 @@ class ValidateAllDomainsTests(unittest.TestCase):
                 expected["recordType"] = record_type
             self.assertEqual(json.loads(command[4]), expected)
             self.assertEqual(result["status"], 200)
+            self.assertEqual(result["validation_status"], "bogus")
+            self.assertIs(result["timed_out"], False)
 
     def test_main_routes_new_domains_with_correct_record_types(self):
         domains = self.new_domains()
@@ -133,7 +137,8 @@ class ValidateAllDomainsTests(unittest.TestCase):
                     self.assertRaises(SystemExit) as exit_result:
                 runner = remote if use_url else isolated
                 runner.return_value = {
-                    "status": 200, "success": False, "error": None, "logs": [], "elapsed": 0
+                    "status": 200, "success": False, "validation_status": "bogus",
+                    "timed_out": False, "error": None, "logs": [], "elapsed": 0
                 }
                 validator.main()
             self.assertEqual(exit_result.exception.code, 0)
@@ -155,6 +160,8 @@ class ValidateAllDomainsTests(unittest.TestCase):
             result = validator.validate_domain("http://localhost:3002/", "example.test", timeout=12)
         self.assertEqual(result["status"], 200)
         self.assertTrue(result["success"])
+        self.assertEqual(result["validation_status"], "secure")
+        self.assertIs(result["timed_out"], False)
         self.assertEqual(result["elapsed"], 43250)
         sleep.assert_called_once_with(43)
         self.assertIn("HTTP 429", output.getvalue())
@@ -213,11 +220,99 @@ class ValidateAllDomainsTests(unittest.TestCase):
                     patch.object(validator.sys, "argv", ["validate_all_domains.py", "--url", "http://localhost"]), \
                     patch.object(validator, "fetch_published_domains", return_value=["sign.ds.error.example.test"]), \
                     patch.object(validator, "validate_domain", return_value={
-                        "status": status, "success": False, "error": error, "logs": [], "elapsed": 0
+                        "status": status, "success": False, "validation_status": "bogus",
+                        "timed_out": False, "error": error, "logs": [], "elapsed": 0
                     }), contextlib.redirect_stdout(io.StringIO()), \
                     self.assertRaises(SystemExit) as exit_result:
                 validator.main()
             self.assertEqual(exit_result.exception.code, expected_exit)
+
+    def test_main_requires_expected_dnssec_state_through_both_runners(self):
+        cases = [
+            ("valid secure", True, {"success": True, "status": "secure"}, 0),
+            ("valid bogus", False, {"success": False, "status": "bogus"}, 0),
+            ("explicit no timeout", False, {"success": False, "status": "bogus", "timedOut": False}, 0),
+            ("timeout", False, {"success": False, "status": "indeterminate", "timedOut": True}, 1),
+            ("timeout even with bogus", False, {"success": False, "status": "bogus", "timedOut": True}, 1),
+            ("timeout even with secure", True, {"success": True, "status": "secure", "timedOut": True}, 1),
+            ("indeterminate", False, {"success": False, "status": "indeterminate"}, 1),
+            ("insecure", False, {"success": False, "status": "insecure"}, 1),
+            ("missing status", False, {"success": False}, 1),
+            ("unknown status", False, {"success": False, "status": "unknown"}, 1),
+            ("wrong success for bogus", False, {"success": True, "status": "bogus"}, 1),
+            ("wrong success for secure", True, {"success": False, "status": "secure"}, 1),
+            ("wrong classification", False, {"success": False, "status": "secure"}, 1),
+            ("bogus instead of secure", True, {"success": False, "status": "bogus"}, 1),
+            ("missing success", False, {"status": "bogus"}, 1),
+            ("non boolean success", False, {"success": 0, "status": "bogus"}, 1),
+            ("invalid timeout flag", False, {"success": False, "status": "bogus", "timedOut": "false"}, 1),
+            ("null timeout flag", False, {"success": False, "status": "bogus", "timedOut": None}, 1),
+            ("numeric timeout flag", False, {"success": False, "status": "bogus", "timedOut": 0}, 1),
+            ("error with bogus", False, {"success": False, "status": "bogus", "error": "DNS timeout"}, 1),
+        ]
+        for use_url in (False, True):
+            for label, success_case, data, expected_exit in cases:
+                domain = "success.example.test" if success_case else "sign.dnskey.error.example.test"
+                argv = ["validate_all_domains.py"] + (["--url", "http://localhost"] if use_url else [])
+                response = self.response()
+                response.read.return_value = json.dumps(data).encode()
+                with self.subTest(runner="http" if use_url else "isolated", case=label), \
+                        patch.object(validator.sys, "argv", argv), \
+                        patch.object(validator, "fetch_published_domains", return_value=[domain]), \
+                        patch.object(validator.urllib.request, "urlopen", return_value=response) as urlopen, \
+                        patch.object(validator.subprocess, "run") as run, \
+                        contextlib.redirect_stdout(io.StringIO()) as output, \
+                        self.assertRaises(SystemExit) as exit_result:
+                    run.return_value.returncode = 0
+                    run.return_value.stdout = json.dumps({"status": 200, "data": data})
+                    validator.main()
+                self.assertEqual(exit_result.exception.code, expected_exit)
+                self.assertIn("PASSED" if expected_exit == 0 else "FAILED", output.getvalue())
+                if use_url:
+                    urlopen.assert_called_once()
+                    run.assert_not_called()
+                else:
+                    run.assert_called_once()
+                    urlopen.assert_not_called()
+                if data.get("timedOut") is True:
+                    self.assertIn("timedOut=True", output.getvalue())
+                if "status" not in data:
+                    self.assertIn("MISSING", output.getvalue())
+
+    def test_runners_preserve_classification_and_timeout(self):
+        data = {"success": False, "status": "indeterminate", "timedOut": True, "logs": ["timeout"]}
+        response = self.response()
+        response.read.return_value = json.dumps(data).encode()
+        with patch.object(validator.urllib.request, "urlopen", return_value=response):
+            remote = validator.validate_domain_once("http://localhost", "example.test")
+        with patch.object(validator.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = json.dumps({"status": 200, "data": data})
+            isolated = validator.run_isolated_validation("example.test", "/project")
+        error = self.http_error(status=500, body=json.dumps(data).encode())
+        self.addCleanup(error.close)
+        with patch.object(validator.urllib.request, "urlopen", side_effect=error):
+            http_error = validator.validate_domain_once("http://localhost", "example.test")
+        for result in (remote, isolated, http_error):
+            self.assertEqual(result["validation_status"], "indeterminate")
+            self.assertIs(result["timed_out"], True)
+            self.assertIs(result["success"], False)
+            self.assertEqual(result["logs"], ["timeout"])
+
+    def test_transport_timeouts_do_not_pass_negative_cases(self):
+        for use_url in (False, True):
+            argv = ["validate_all_domains.py"] + (["--url", "http://localhost"] if use_url else [])
+            with self.subTest(use_url=use_url), \
+                    patch.object(validator.sys, "argv", argv), \
+                    patch.object(validator, "fetch_published_domains", return_value=["sign.ds.error.example.test"]), \
+                    patch.object(validator.urllib.request, "urlopen", side_effect=TimeoutError("HTTP timeout")), \
+                    patch.object(validator.subprocess, "run", side_effect=validator.subprocess.TimeoutExpired("node", 30)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    self.assertRaises(SystemExit) as exit_result:
+                validator.main()
+            self.assertEqual(exit_result.exception.code, 1)
+            self.assertIn("FAILED", output.getvalue())
+            self.assertIn("Error:", output.getvalue())
 
     def test_negative_retry_count_is_rejected_before_network_access(self):
         with patch.object(validator.sys, "argv", ["validate_all_domains.py", "--rate-limit-retries", "-1"]), \

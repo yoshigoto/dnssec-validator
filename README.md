@@ -106,6 +106,8 @@ python3 test/validate_all_domains.py --url http://localhost:3002
 
 HTTP 429 の場合は `Retry-After` の秒数だけ待ち、同じドメインを最大3回再試行します。ヘッダーがない、または秒数形式でない場合は60秒待ちます。`--rate-limit-retries` で回数を変更でき、`0` で再試行を無効にできます。HTTP エラーは DNSSEC の検証失敗とは区別し、テスト不一致として扱います。`--url` を省略するとドメインごとに独立した Node プロセスを起動するため、レート制限の状態は共有されません。
 
+一括検証は HTTP 200・エラーなし・タイムアウトなしに加え、成功用ドメイン（`success.` / `www.success.`）では `status: "secure"` と `success: true`、それ以外の不正設定用ドメインでは `status: "bogus"` と `success: false` の両方を要求します。`indeterminate`（判定不能）、`insecure`（未署名の委任）、判定情報の欠落や不整合は、不正設定を検出したことにはならないため不一致です。HTTP 経由・独立プロセス経由とも同じ基準を使い、不一致が1件でもあれば終了コード1を返します。結果には期待・実際の DNSSEC 状態と、タイムアウト時の `timedOut` を表示します。
+
 一括検証スクリプトの待機・再試行のテストは、外部通信なしで実行できます。
 
 ```bash
