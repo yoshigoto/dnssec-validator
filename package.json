@@ -7,6 +7,9 @@
     "start": "node dnssec-validator.js",
     "test": "node --test"
   },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  },
   "dependencies": {
     "@noble/post-quantum": "^0.7.1",
     "dns-packet": "^5.6.1",
