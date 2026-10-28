@@ -249,25 +249,6 @@ function renderDiagram(diagram) {
     document.getElementById('diagram').style.display = 'block';
 }
 
-function renderNextChecks(checks) {
-    const nextChecksBox = document.getElementById('nextChecksBox');
-    const nextChecksList = document.getElementById('nextChecksList');
-    if (!nextChecksBox || !nextChecksList) return;
-    const items = (checks || []).filter(Boolean);
-    if (items.length === 0) {
-        nextChecksBox.style.display = 'none';
-        nextChecksList.replaceChildren();
-        return;
-    }
-    nextChecksList.replaceChildren();
-    for (const item of items) {
-        const li = document.createElement('li');
-        li.textContent = sanitizeDisplayText(item);
-        nextChecksList.appendChild(li);
-    }
-    nextChecksBox.style.display = 'block';
-}
-
 async function validate(event) {
     event.preventDefault();
     let domain = domainInput.value.trim();
@@ -280,7 +261,6 @@ async function validate(event) {
     statusBox.innerText = '検証中... (権威サーバーへ直接クエリを送信しています)';
     errorDetailsElement.style.display = 'none';
     errorDetailsElement.textContent = '';
-    renderNextChecks([]);
     renderDiagram(emptyDiagram(domain));
     try {
         const response = await fetch('./api/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, recordType: recordTypeInput.value }) });
@@ -298,7 +278,6 @@ async function validate(event) {
                 errorDetailsElement.textContent = sanitizeDisplayText(errorLines.join('\n'));
                 errorDetailsElement.style.display = 'block';
             }
-            renderNextChecks(data.nextChecks);
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
             const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
@@ -309,11 +288,6 @@ async function validate(event) {
                 errorDetailsElement.textContent = sanitizeDisplayText(detailLines.join('\n'));
                 errorDetailsElement.style.display = 'block';
             }
-            if (data.status !== 'secure') {
-                renderNextChecks(data.nextChecks);
-            } else {
-                renderNextChecks([]);
-            }
             if (data.diagram) renderDiagram(data.diagram);
         }
     } catch (error) {
@@ -321,7 +295,6 @@ async function validate(event) {
         statusBox.innerText = '判定不能（通信エラー）';
         errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)));
         errorDetailsElement.style.display = 'block';
-        renderNextChecks(['権威サーバーへの疎通を確認し、時間をおいて再試行してください。']);
         renderDiagram(emptyDiagram(domain));
     }
 }

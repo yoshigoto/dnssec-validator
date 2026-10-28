@@ -149,7 +149,7 @@ for (const [status, className] of [
     ['secure', 'status-success'], ['insecure', 'status-insecure'],
     ['bogus', 'status-failed'], ['indeterminate', 'status-indeterminate']
 ]) {
-    test(`${status}のAPI応答を状態ラベル・スタイル・次の確認事項へ反映する`, async t => {
+    test(`${status}のAPI応答を状態ラベル・スタイルへ反映する`, async t => {
         const result = makeResult(status);
         result.logs = status === 'secure' ? [] : ['確認用ログ'];
         const ui = createUi(t, { respond: () => jsonResponse(result) });
@@ -158,8 +158,7 @@ for (const [status, className] of [
         // jsdom has no layout engine; read the same innerText property the client writes.
         assert.equal(ui.element('statusBox').innerText, result.statusLabel);
         assert.equal(ui.element('diagram').style.display, 'block');
-        assert.equal(ui.element('nextChecksBox').style.display, status === 'secure' ? 'none' : 'block');
-        assert.equal(ui.element('nextChecksList').children.length, status === 'secure' ? 0 : 1);
+        assert.equal(ui.element('nextChecksBox'), null);
         assert.equal(ui.element('validation-error-details').style.display, status === 'secure' ? 'none' : 'block');
         assert.match(ui.element('childARecordValidation').textContent, /AAAAレコードDNSSEC検証/);
         assert.match(ui.element('childARecordValidation').textContent, /信頼の連鎖: 成功/);
@@ -167,7 +166,7 @@ for (const [status, className] of [
     });
 }
 
-test('JSONエラー・HTTP 429の詳細と再確認事項を表示する', async t => {
+test('JSONエラー・HTTP 429の詳細を表示する', async t => {
     const ui = createUi(t, { respond: () => jsonResponse({
         error: 'リクエスト制限に達しました。', logs: ['60秒後に再試行'],
         nextChecks: ['時間をおいて再試行してください。']
@@ -176,7 +175,6 @@ test('JSONエラー・HTTP 429の詳細と再確認事項を表示する', async
     assert.equal(ui.element('statusBox').innerText, '判定不能（エラー）');
     assert.equal(ui.element('statusBox').classList.contains('status-indeterminate'), true);
     assert.match(ui.element('validation-error-details').textContent, /リクエスト制限.*\n60秒後/);
-    assert.equal(ui.element('nextChecksList').children.length, 1);
 });
 
 for (const [kind, respond, expected] of [
@@ -193,12 +191,12 @@ for (const [kind, respond, expected] of [
         assert.equal(ui.element('statusBox').classList.contains('status-indeterminate'), true);
         assert.equal(ui.element('validation-error-details').style.display, 'block');
         assert.match(ui.element('validation-error-details').textContent, expected);
-        assert.equal(ui.element('nextChecksBox').style.display, 'block');
+        assert.equal(ui.element('nextChecksBox'), null);
         assert.doesNotMatch(ui.element('diagram').textContent, /Gateway timeout/);
     });
 }
 
-test('再検証中に前回のエラー・確認事項・比較表・提案を消し、完了後に新しい結果を表示する', async t => {
+test('再検証中に前回のエラー・比較表・提案を消し、完了後に新しい結果を表示する', async t => {
     let resolveResponse;
     const previous = { ...makeResult('bogus'), logs: ['前回のエラー'] };
     previous.diagram.authorityChecks = { parent: {
@@ -209,7 +207,6 @@ test('再検証中に前回のエラー・確認事項・比較表・提案を�
     const ui = createUi(t, { respond: () => response });
     await ui.submit();
     assert.equal(ui.element('validation-error-details').style.display, 'block');
-    assert.equal(ui.element('nextChecksBox').style.display, 'block');
     assert.match(ui.element('authorityChecksBody').textContent, /old.example.test/);
     assert.match(ui.element('dsProposalContent').textContent, /古い提案/);
     response = new Promise(resolve => { resolveResponse = resolve; });
@@ -218,7 +215,6 @@ test('再検証中に前回のエラー・確認事項・比較表・提案を�
     assert.match(ui.element('statusBox').innerText, /検証中/);
     assert.equal(ui.element('validation-error-details').textContent, '');
     assert.equal(ui.element('validation-error-details').style.display, 'none');
-    assert.equal(ui.element('nextChecksList').children.length, 0);
     assert.equal(ui.element('authorityChecks').style.display, 'none');
     assert.equal(ui.element('dsProposal').style.display, 'none');
     assert.equal(ui.element('authorityChecksBody').children.length, 0);
