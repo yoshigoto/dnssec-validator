@@ -97,6 +97,18 @@ function createUi(t, { search = '', savedDomain, storageUnavailable = false, res
     };
 }
 
+test('HTMLのランドマーク、フォームラベル、リスト、結果表が意味的に正しく構成される', () => {
+    const document = new JSDOM(html).window.document;
+    const ids = [...document.querySelectorAll('[id]')].map(element => element.id);
+
+    assert.equal(document.querySelectorAll('main').length, 1);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.ok([...document.querySelectorAll('label[for]')].every(label => document.getElementById(label.htmlFor)));
+    assert.ok([...document.querySelectorAll('ul, ol')].every(list => [...list.children].every(child => child.tagName === 'LI')));
+    assert.equal(document.querySelector('#statusBox').getAttribute('aria-live'), 'polite');
+    assert.ok(document.querySelector('#authorityChecks table caption'));
+});
+
 test('画面の全8種の選択肢から種別とURLのホスト名をAPIへ送る', async t => {
     const ui = createUi(t);
     assert.equal(ui.requests.length, 0);
@@ -122,6 +134,10 @@ test('Englishリンクで英語表示に切り替わり、日本語へ戻るリ�
     assert.equal(ui.element('languageLink').getAttribute('href'), '/dnssec-validator/?domain=url.example.test&recordType=mx');
     assert.equal(ui.element('validateForm').querySelector('button').textContent, 'Start validation');
     assert.equal(ui.element('statusBox').innerText, 'Secure (validation succeeded)');
+    const rolloverSteps = ui.element('dsProposal').querySelectorAll('ol li');
+    assert.equal(rolloverSteps.length, 3);
+    assert.match(rolloverSteps[0].textContent, /DS for the new key is registered with the parent/);
+    assert.match(ui.window.document.querySelector('#authorityChecks table caption').textContent, /Authoritative server response comparison/);
     assert.match(ui.element('childARecordValidation').textContent, /DNSSEC validation for AAAA record/);
     assert.match(ui.element('childARecordValidation').textContent, /Chain of trust: secure/);
 
