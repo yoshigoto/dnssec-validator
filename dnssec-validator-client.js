@@ -93,7 +93,6 @@ function translate(value) {
         ['ハッシュ不一致', 'Hash mismatch'],
         ['ハッシュ照合対象なし', 'nothing to compare'],
         ['Key Tag', 'Key Tag'],
-        ['取得できませんでした', 'Could not retrieve'],
         ['詳細:', 'Details: ']
     ];
     for (const [japanese, english] of replacements) text = text.replaceAll(japanese, english);
@@ -155,10 +154,11 @@ const dnssecAlgorithmNames = { 1: 'RSAMD5', 5: 'RSASHA1', 7: 'RSASHA1-NSEC3-SHA1
 const algorithmText = algorithm => 'alg ' + algorithm + ' (' + (dnssecAlgorithmNames[algorithm] || 'Unknown') + ')';
 const keyText = (records, role) => !records || records.length === 0 ? [role + ': 取得できませんでした'] : records.map(record => role + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm));
 const dsText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest ' + record.digest);
+const rrsigDateFormatter = new Intl.DateTimeFormat(isEnglish ? 'en-US' : 'ja-JP', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Tokyo' });
 function rrsigExpirationText(expiration) {
     if (!Number.isFinite(expiration)) return '';
     const remainingSeconds = expiration - Math.floor(Date.now() / 1000);
-    const expirationDate = new Intl.DateTimeFormat(isEnglish ? 'en-US' : 'ja-JP', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Tokyo' }).format(new Date(expiration * 1000));
+    const expirationDate = rrsigDateFormatter.format(new Date(expiration * 1000));
     let remainingText;
     if (remainingSeconds <= 0) {
         remainingText = '期限切れ';
