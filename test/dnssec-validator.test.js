@@ -1929,26 +1929,55 @@ test('問い合わせ名と無関係な referral を辿らない', async () => {
     assert.match(result.discoveryError, /無関係な委任 \[test\]/);
 });
 
-test('DNSKEY RRsetの件数・RRSIGの件数・所有者名を制限する', async () => {
+test('RRset取得時に所有者名と署名種別を照合し、RRset・RRSIG・不在証明の上限を守る', async () => {
     const manyKeys = Array.from({ length: 33 }, () => ({ name: 'example.test', type: 'DNSKEY', data: makeDnskeyData() }));
     await assert.rejects(getResourceRecord('example.test', '192.0.2.3', 'DNSKEY', {
         queryDirectlyUDP: async () => ({ rcode: 'NOERROR', answers: manyKeys, authorities: [] })
     }), /DNSKEY RRsetが多すぎます/);
 
-    const signatures = Array.from({ length: 20 }, () => ({ name: 'example.test', type: 'RRSIG', data: { typeCovered: 'A' } }));
+    const signatures = Array.from({ length: 20 }, (_, index) => ({
+        name: index === 0 ? 'other.test' : 'example.test',
+        type: 'RRSIG',
+        data: { typeCovered: index === 1 ? 'AAAA' : 'A', id: index }
+    }));
+    const denialRecords = Array.from({ length: 40 }, (_, index) => ({
+        name: `nsec-${index}.example.test`, type: 'NSEC',
+        data: { nextDomain: `next-${index}.example.test`, rrtypes: [] }
+    }));
+    const denialSignatures = Array.from({ length: 70 }, (_, index) => ({
+        name: `nsec-${index}.example.test`, type: 'RRSIG', data: { typeCovered: 'NSEC', id: index }
+    }));
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
         queryDirectlyUDP: async () => ({
             rcode: 'NOERROR',
             answers: [
                 { name: 'example.test', type: 'A', data: '192.0.2.10' },
                 { name: 'other.test', type: 'A', data: '192.0.2.11' },
-                ...signatures
+                ...signatures,
+                { name: 'example.test', type: 'RRSIG', data: { typeCovered: 'AAAA' } }
             ],
-            authorities: []
+            authorities: [
+                ...denialRecords,
+                { name: 'example.test', type: 'SOA', data: {} },
+                ...denialSignatures
+            ]
         })
     });
     assert.deepEqual(result.resourceRecords.map(record => record.data), ['192.0.2.10']);
     assert.equal(result.rrsigRecords.length, 8);
+    assert.deepEqual(result.rrsigRecords.map(record => record.data.id), [2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.equal(result.denialRecords.length, 32);
+    assert.equal(result.denialRrsigRecords.length, 64);
+
+    const noRrset = await getResourceRecord('example.test', '192.0.2.3', 'A', {
+        queryDirectlyUDP: async () => ({
+            rcode: 'NOERROR',
+            answers: [{ name: 'example.test', type: 'RRSIG', data: { typeCovered: 'A' } }],
+            authorities: []
+        })
+    });
+    assert.deepEqual(noRrset.resourceRecords, []);
+    assert.deepEqual(noRrset.rrsigRecords, []);
 });
 
 test('レート制限キーはIPv6を/64単位、IPv4射影アドレスをIPv4として集計する', () => {

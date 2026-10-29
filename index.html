@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>DNSSEC委任状態検証ツール</title>
     <style>
-        :root { --ink: #172b4d; --muted: #667085; --line: #cbd5e1; --blue: #2563eb; --teal: #0f766e; --good: #15803d; --bad: #b42318; --paper: #f8fafc; }
+        :root { --ink: #172b4d; --muted: #667085; --line: #cbd5e1; --blue: #2563eb; --good: #15803d; --bad: #b42318; }
         * { box-sizing: border-box; }
         body { font-family: Georgia, 'Yu Mincho', serif; margin: 0; padding: 32px 18px; background: linear-gradient(135deg, #e0f2fe, #f8fafc 45%, #fef3c7); color: var(--ink); text-autospace: normal; }
         .card { max-width: 1200px; margin: 0 auto; padding: 30px; background: rgba(255,255,255,.92); border: 1px solid rgba(23,43,77,.12); box-shadow: 0 18px 45px rgba(23,43,77,.12); }
@@ -21,7 +21,8 @@
         .identifier { text-autospace: no-autospace; }
         .input-row label { margin: 0; white-space: nowrap; font: bold 13px sans-serif; }
         select { padding: 12px 30px 12px 10px; border: 1px solid var(--line); border-radius: 7px; background: white; font: 15px sans-serif; }
-        input[type="text"]:focus { border-color: var(--blue); outline: 3px solid #bfdbfe; }
+        input[type="text"]:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+        input[type="text"]:focus-visible { border-color: var(--blue); }
         button { background: var(--ink); color: white; border: none; padding: 12px 24px; border-radius: 7px; cursor: pointer; font: bold 15px sans-serif; white-space: nowrap; }
         button:hover { background: var(--blue); }
 
@@ -36,7 +37,7 @@
         .status-failed { background: #fff1f0; color: var(--bad); border-color: var(--bad); }
         .status-insecure { background: #fff7ed; color: #9a3412; border-color: #ea580c; }
         .status-indeterminate { background: #fffbeb; color: #92400e; border-color: #ca8a04; }
-        .validation-error-details { display: none; margin: 12px 0 18px; padding: 12px 14px; background: #fff7ed; border: 1px solid #fed7aa; border-left: 4px solid #f97316; color: #7c2d12; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;  border-radius: 4px; }
+        .validation-error-details { display: none; margin: 12px 0 18px; padding: 12px 14px; background: #fff7ed; border: 1px solid #fed7aa; border-left: 4px solid #f97316; color: #7c2d12; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 4px; }
         .diagram { display: none; overflow-x: auto; padding: 14px 0 4px; font-family: sans-serif; }
         .diagram h2 { margin: 0 0 10px; font-size: 17px; }
         .apex-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 14px; color: var(--muted); font: 14px sans-serif; }
@@ -44,8 +45,6 @@
         .zone { position: relative; z-index: 3; align-self: stretch; padding: 14px; background: transparent; border: 1px solid var(--line); border-radius: 9px; pointer-events: none; }
         .zone-title { position: absolute; top: 10px; left: 14px; margin: 0; padding: 2px 6px; border-radius: 4px; font-size: 14px; line-height: 1.4; color: var(--muted); white-space: nowrap; }
         .node { position: relative; z-index: 2; justify-self: center; width: 86%; min-height: 80px; padding: 8px 14px; background: white; border: 2px solid var(--line); border-radius: 10px; box-shadow: 0 5px 12px rgba(23,43,77,.07); }
-        .node.good { border-color: #86efac; background: #f0fdf4; }
-        .node.bad { border-color: #fca5a5; background: #fff1f2; }
         .node-title { font-weight: bold; font-size: 15px; }
         .node-meta { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; margin-left: 14px; }
         .signature-failed { color: var(--bad); }
@@ -88,10 +87,11 @@
         .legend { margin-top: 16px; color: var(--muted); font: 12px sans-serif; }
         .footer { max-width: 1200px; margin: 18px auto 0; color: var(--muted); font: 12px/1.6 sans-serif; text-align: center; }
         .footer a { color: inherit; }
+        .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     </style>
 </head>
 <body>
-    <div class="card">
+    <main class="card">
         <nav class="language-bar" aria-label="Language"><a id="languageLink" href="?lang=en">English</a></nav>
         <h1 data-en="DNSSEC Delegation Validator">DNSSEC委任状態検証ツール</h1>
         <p class="lead" data-en="Validate the chain of trust using the parent zone's DS and the child zone's KSK.">親ゾーンの DS と子ゾーンの KSK を元に信頼の連鎖を検証します。</p>
@@ -118,7 +118,7 @@
             </div>
         </form>
 
-        <div id="statusBox" class="result-status-box"></div>
+        <div id="statusBox" class="result-status-box" role="status" aria-live="polite" aria-atomic="true"></div>
         <div id="validation-error-details" class="validation-error-details" role="alert"></div>
         <section id="diagram" class="diagram" aria-live="polite">
             <h2 data-en="Validation diagram">検証結果の関係図</h2>
@@ -140,6 +140,7 @@
                 <p data-en="Compares the parent's delegated NS/DS and the child's authoritative NS/DNSKEY. RRSIG records are not compared.">親の委任 NS/DS と子の権威 NS/DNSKEY を比較します。RRSIG はこの表の比較対象外です。</p>
                 <div class="authority-table-wrap">
                     <table>
+                        <caption class="visually-hidden" data-en="Authoritative server response comparison">権威サーバー応答の比較</caption>
                         <thead><tr><th data-en="Name server">ネームサーバー</th><th data-en="Response IP">応答IP</th><th data-en="RRset contents (summary)">RRsetの内容（要約）</th></tr></thead>
                         <tbody id="authorityChecksBody"></tbody>
                     </table>
@@ -151,17 +152,19 @@
                 <ul>
                     <li data-en="This diagnosis uses records retrieved from one parent and one child authoritative server found during zone-apex discovery.">ゾーン頂点の探索で見つけた親側・子側それぞれ 1台の権威サーバーから取得したレコードによる診断です。</li>
                     <li data-en="This tool does not automatically change the parent or verify the signatures or trust of proposed records.">親側での自動変更や提案レコードの署名・信頼の検証は行いません。</li>
-                    <li data-en="For a key rollover, verify the following:">鍵ロールオーバーでは、以下を確認してください。</li>
-                    <ol>
-                        <li data-en="The DS for the new key is registered with the parent.">新しい鍵に対応する DS が親に登録されていること。</li>
-                        <li data-en="The DNSKEY signature made with the new key can be verified.">新しい鍵による DNSKEY の署名を検証できること。</li>
-                        <li data-en="Keep the old key until cached DS and DNSKEY data from before the update has expired.">DS と DNSKEY の更新前の情報がキャッシュから消えるまで古い鍵を保持すること。</li>
-                    </ol>
+                    <li>
+                        <span data-en="For a key rollover, verify the following:">鍵ロールオーバーでは、以下を確認してください。</span>
+                        <ol>
+                            <li data-en="The DS for the new key is registered with the parent.">新しい鍵に対応する DS が親に登録されていること。</li>
+                            <li data-en="The DNSKEY signature made with the new key can be verified.">新しい鍵による DNSKEY の署名を検証できること。</li>
+                            <li data-en="Keep the old key until cached DS and DNSKEY data from before the update has expired.">DS と DNSKEY の更新前の情報がキャッシュから消えるまで古い鍵を保持すること。</li>
+                        </ol>
+                    </li>
                     <li><span data-en="In ">In </span><a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a><span data-en=", CDS 0 0 0 0 / CDNSKEY 0 3 0 0 requests deletion of the entire parent DS RRset. This breaks the DNSSEC chain of trust, so confirm that this change is intended."> の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親の DS RRset 全体を削除する要求です。これが実行されると DNSSEC の信頼の連鎖が途切れるため、意図した変更か確認してください。</span></li>
                 </ul>
             </section>
         </section>
-    </div>
+    </main>
     <footer class="footer">
         © 2026 <a href="https://x.com/goto_ipv6" target="_blank" rel="noopener noreferrer">Y.Goto</a><br>
         <span data-en="This tool is provided for testing and evaluation.">本ツールは検証・評価目的で提供されています。</span>

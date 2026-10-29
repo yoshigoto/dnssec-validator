@@ -287,25 +287,37 @@ async function getResourceRecord(domain, serverIp, rType, options = {}) {
 
     const normalizedDomain = normalizeDnsName(domain);
     const answers = res.answers || [];
-    const resourceRecords = answers.filter(a => a.type === rType && normalizeDnsName(a.name) === normalizedDomain);
+    const resourceRecords = [];
+    const rrsigRecords = [];
+    for (const answer of answers) {
+        if (normalizeDnsName(answer.name) !== normalizedDomain) continue;
+        if (answer.type === rType) {
+            resourceRecords.push(answer);
+        } else if (answer.type === 'RRSIG' && answer.data.typeCovered === rType && rrsigRecords.length < MAX_RRSIGS_PER_RRSET) {
+            rrsigRecords.push(answer);
+        }
+    }
     if (rType === 'DNSKEY' && resourceRecords.length > MAX_DNSKEY_RRSET_SIZE) {
         throw new Error(`${serverIp}のDNSKEY RRsetが多すぎます (${resourceRecords.length}件、上限${MAX_DNSKEY_RRSET_SIZE}件)`);
     }
     if (rType === 'DS' && resourceRecords.length > MAX_DS_RRSET_SIZE) {
         throw new Error(`${serverIp}のDS RRsetが多すぎます (${resourceRecords.length}件、上限${MAX_DS_RRSET_SIZE}件)`);
     }
-    let rrsigRecords = [];
-    if (resourceRecords.length !== 0) {
-        rrsigRecords = answers
-            .filter(a => a.type === 'RRSIG' && a.data.typeCovered === rType && normalizeDnsName(a.name) === normalizedDomain)
-            .slice(0, MAX_RRSIGS_PER_RRSET);
-    }
-
+    if (resourceRecords.length === 0) rrsigRecords.length = 0;
     const authorityRecords = res.authorities || [];
-    const denialRecords = authorityRecords.filter(record => record.type === 'NSEC' || record.type === 'NSEC3').slice(0, MAX_DENIAL_RECORDS);
-    const denialRrsigRecords = authorityRecords
-        .filter(record => record.type === 'RRSIG' && (record.data.typeCovered === 'NSEC' || record.data.typeCovered === 'NSEC3'))
-        .slice(0, MAX_DENIAL_RECORDS * 2);
+    const denialRecords = [];
+    const denialRrsigRecords = [];
+    for (const record of authorityRecords) {
+        if ((record.type === 'NSEC' || record.type === 'NSEC3') && denialRecords.length < MAX_DENIAL_RECORDS) {
+            denialRecords.push(record);
+        } else if (
+            record.type === 'RRSIG' &&
+            (record.data.typeCovered === 'NSEC' || record.data.typeCovered === 'NSEC3') &&
+            denialRrsigRecords.length < MAX_DENIAL_RECORDS * 2
+        ) {
+            denialRrsigRecords.push(record);
+        }
+    }
     return { resourceRecords, rrsigRecords, denialRecords, denialRrsigRecords, rcode: res.rcode };
 }
 
@@ -1235,10 +1247,6 @@ function verifyRecordRrsig(records, rrsig, dnskeyRecord, domain) {
     return { verified: false, reason: `未対応の暗号アルゴリズム [${dnskeyRecord.data.algorithm}]` };
 }
 
-function verifyARecordRrsig(aRecords, rrsig, dnskeyRecord, domain) {
-    return verifyRecordRrsig(aRecords, rrsig, dnskeyRecord, domain);
-}
-
 function isZoneSigningKey(flags) {
     return (flags & 0x0100) !== 0;
 }
@@ -1494,19 +1502,19 @@ function findNxDomainProof(domain, denialRecords) {
     const withDiagnostics = diagnostics => [...preparationDiagnostics, ...diagnostics];
     const nsecRecords = records.filter(record => record.type === 'NSEC');
     const labels = normalizeDnsName(domain).split('.');
-    const closestEncloserCandidates = labels.slice(1).map((label, index) => labels.slice(index + 1).join('.'));
+    const closestEncloserCandidates = labels.slice(1).map((_, index) => labels.slice(index + 1).join('.'));
     const observedNsec = nsecRecords.map(record => ({ name: record.name, nextDomain: record.data.nextDomain }));
+    const hasOtherNsecOwner = new Set(nsecRecords.map(record => normalizeDnsName(record.name))).size > 1;
     const coversName = (record, name) => {
         const isSelfLoop = normalizeDnsName(record.name) === normalizeDnsName(record.data.nextDomain);
-        const hasOtherNsecOwner = nsecRecords.some(candidate => normalizeDnsName(candidate.name) !== normalizeDnsName(record.name));
         return !(isSelfLoop && hasOtherNsecOwner) && dnsNameIsCovered(name, record.name, record.data.nextDomain);
     };
-    for (const closestEncloser of closestEncloserCandidates) {
+    for (const [candidateIndex, closestEncloser] of closestEncloserCandidates.entries()) {
         const closestEncloserRecord = nsecRecords.find(record => normalizeDnsName(record.name) === closestEncloser);
         if (!closestEncloserRecord) {
             continue;
         }
-        const nextCloser = `${labels[closestEncloserCandidates.indexOf(closestEncloser)]}.${closestEncloser}`;
+        const nextCloser = `${labels[candidateIndex]}.${closestEncloser}`;
         const wildcard = `*.${closestEncloser}`;
         const nextCloserRecord = nsecRecords.find(record => coversName(record, nextCloser));
         const wildcardRecord = nsecRecords.find(record => coversName(record, wildcard));
@@ -1537,7 +1545,7 @@ function findNxDomainProof(domain, denialRecords) {
         return { records: [], diagnostics: withDiagnostics(['権威サーバーの応答に NSEC/NSEC3 レコードがありません']), observedNsec3 };
     }
 
-    const hasOtherNsec3Owner = record => nsec3Records.some(candidate => normalizeDnsName(candidate.name) !== normalizeDnsName(record.name));
+    const hasOtherNsec3Owner = new Set(nsec3Records.map(record => normalizeDnsName(record.name))).size > 1;
     const hashName = createNsec3Hasher();
 
     try {
@@ -1557,7 +1565,7 @@ function findNxDomainProof(domain, denialRecords) {
                     const nextHash = toBase32Hex(record.data.nextDomain);
                     const nameHash = hashName(name, salt, iterations);
                     const isSelfLoop = ownerHash === nextHash;
-                    return !(isSelfLoop && hasOtherNsec3Owner(record)) && valueIsCovered(nameHash, ownerHash, nextHash);
+                    return !(isSelfLoop && hasOtherNsec3Owner) && valueIsCovered(nameHash, ownerHash, nextHash);
                 };
                 const nextCloserRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, nextCloser));
                 const wildcardRecord = nsec3Records.find(record => record.data.iterations === iterations && Buffer.compare(record.data.salt, salt) === 0 && coversName(record, wildcard));
@@ -1613,7 +1621,6 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
     const diagnoseDsProposal = validationDependencies.diagnoseDsProposals || diagnoseDsProposals;
     
     let logs = [];
-    let success = false;
     const diagram = {
         parent: { name: domain, server: '', ds: [], rrsig: [], dnskey: [], dsAbsenceProof: null },
         child: { name: domain, server: '', dnskey: [], rrsig: [], aRecordValidation: null },
@@ -1668,11 +1675,6 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             parent: { nameservers: parentNsComparison, ds: parentDsComparison },
             child: { nameservers: childNsComparison, dnskey: childDnskeyComparison }
         };
-        let tempLog = '';
-        if (zoneApexInfo.parentNs !== '') {
-            tempLog += `${zoneApexInfo.parentNs} または `;
-        }
-
         // 2. 親サーバーからDSレコードを取得
         // DS は親ゾーン側のデータのため、子ゾーンの権威サーバーには決して問い合わせない
         // (子が自己署名した DS を返すだけで Secure と誤判定させられるため)。
@@ -1695,8 +1697,6 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
                 logs.push(`親サーバー [${candidate}] へのクエリ失敗: ${err.message}`);
             }
         }
-        const dsInfo = parentDsInfo;
-        const parentDsIp = parentIp;
         diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs || zoneApexInfo.parentNs || zoneApexInfo.currentNs;
 
         let childIp = '';
@@ -1713,7 +1713,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             diagram.dsProposal = { parentDs: [], cds: null, cdnskey: null, notes: ['親側DSを取得できないため、提案との差分は判定できません。'] };
         }
         
-        if (!dsInfo || dsInfo.resourceRecords.length === 0) {
+        if (!parentDsInfo || parentDsInfo.resourceRecords.length === 0) {
             const proofResult = analyzeDsAbsenceProof(zoneApexInfo.zoneApex, parentDsInfo && parentDsInfo.denialRecords, parentDsInfo && parentDsInfo.rcode);
             const denialProof = {
                 rcode: parentDsInfo && parentDsInfo.rcode || '',
@@ -1729,7 +1729,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
                     return { name: record.name, type: record.type, expiration: signature && signature.data.expiration };
                 })
             };
-            if (proofResult.records.length > 0 && parentDsIp) {
+            if (proofResult.records.length > 0 && parentIp) {
                 const recordResults = [];
                 for (const record of proofResult.records) {
                     const signatures = (parentDsInfo.denialRrsigRecords || [])
@@ -1743,7 +1743,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
                             continue;
                         }
                         try {
-                            const parentDnskeyInfo = await fetchResourceRecord(signerName, parentDsIp, 'DNSKEY');
+                            const parentDnskeyInfo = await fetchResourceRecord(signerName, parentIp, 'DNSKEY');
                             const parentDnskeyRecords = parentDnskeyInfo.resourceRecords || [];
                             diagram.parent.dnskey = parentDnskeyRecords.map(key => ({
                                 keyTag: calculateKeyTag(key.data.algorithm, buildDnskeyFullRdata(key.data)),
@@ -1775,7 +1775,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             return sendJson(200, { success: false, logs: [...logs, '親サーバーの IP アドレス取得に失敗しました。'], diagram });
         }
         
-        const dsRecords = dsInfo.resourceRecords;
+        const dsRecords = parentDsInfo.resourceRecords;
         diagram.parent.name = zoneApexInfo.zoneApex;
         diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || targetNs;
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -1786,7 +1786,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             digestType: ds.data.digestType,
             digest: ds.data.digest.toString('hex')
         }));
-        const rrsigRecords = dsInfo.rrsigRecords;
+        const rrsigRecords = parentDsInfo.rrsigRecords;
         diagram.parent.rrsig = rrsigRecords.map(rrsig => ({
             keyTag: rrsig.data.keyTag,
             typeCovered: rrsig.data.typeCovered,
@@ -2017,7 +2017,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             }
         }
 
-        success = isValidationSuccessful(diagram);
+        const success = isValidationSuccessful(diagram);
         if (!matchFound) {
             logs.push(`親ゾーンのDSレコードと子ゾーンのDNSKEYレコードの突合に失敗しました。DNSSECが正しく委任されていない可能性があります。`);
         } else if (!success && diagram.child.aRecordValidation && !diagram.child.aRecordValidation.error) {
