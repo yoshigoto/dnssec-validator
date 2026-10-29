@@ -112,6 +112,38 @@ test('画面の全8種の選択肢から種別とURLのホスト名をAPIへ送�
     }
 });
 
+test('Englishリンクで英語表示に切り替わり、日本語へ戻るリンクが検証条件を保つ', async t => {
+    const ui = createUi(t, { search: '?lang=en&domain=url.example.test&recordType=mx' });
+    await waitForResult(ui);
+    assert.equal(ui.window.document.documentElement.lang, 'en');
+    assert.equal(ui.window.document.title, 'DNSSEC Delegation Validator');
+    assert.equal(ui.element('englishNote').hidden, false);
+    assert.equal(ui.element('languageLink').textContent, '日本語');
+    assert.equal(ui.element('languageLink').getAttribute('href'), '/dnssec-validator/?domain=url.example.test&recordType=mx');
+    assert.equal(ui.element('validateForm').querySelector('button').textContent, 'Start validation');
+    assert.equal(ui.element('statusBox').innerText, 'Secure (validation succeeded)');
+    assert.match(ui.element('childARecordValidation').textContent, /DNSSEC validation for AAAA record/);
+    assert.match(ui.element('childARecordValidation').textContent, /Chain of trust: secure/);
+
+    const japanese = createUi(t);
+    assert.equal(japanese.element('languageLink').textContent, 'English');
+    assert.equal(japanese.element('languageLink').getAttribute('href'), '/dnssec-validator/?lang=en');
+    assert.equal(japanese.window.document.documentElement.lang, 'ja');
+});
+
+test('English表示で不在証明の結果も英語で表示する', async t => {
+    const result = makeResult();
+    result.diagram.child.aRecordValidation.recordsFound = false;
+    result.diagram.child.aRecordValidation.signatures = [];
+    result.diagram.child.aRecordValidation.denialProof = {
+        rcode: 'NOERROR', type: 'NSEC3', verified: true,
+        records: [{ name: 'example.test', type: 'NSEC3', expiration: NOW_SECONDS + 86400 }]
+    };
+    const ui = createUi(t, { search: '?lang=en', respond: () => jsonResponse(result) });
+    await ui.submit();
+    assert.match(ui.element('childARecordValidation').textContent, /NSEC3 proof for AAAA record absence: Passed/);
+});
+
 test('空入力は警告してAPIを呼ばず、入力時はドメインを保存する', async t => {
     const ui = createUi(t);
     await ui.submit('  ');

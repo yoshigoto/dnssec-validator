@@ -9,8 +9,11 @@
         * { box-sizing: border-box; }
         body { font-family: Georgia, 'Yu Mincho', serif; margin: 0; padding: 32px 18px; background: linear-gradient(135deg, #e0f2fe, #f8fafc 45%, #fef3c7); color: var(--ink); text-autospace: normal; }
         .card { max-width: 1200px; margin: 0 auto; padding: 30px; background: rgba(255,255,255,.92); border: 1px solid rgba(23,43,77,.12); box-shadow: 0 18px 45px rgba(23,43,77,.12); }
+        .language-bar { display: flex; justify-content: flex-end; margin: -10px 0 12px; font: 14px sans-serif; }
+        .language-bar a { color: var(--blue); }
         h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0; }
         .lead { margin: 0 0 24px; color: var(--muted); font-family: sans-serif; font-size: 14px; }
+        .language-note { margin: -16px 0 24px; color: var(--muted); font: 12px/1.5 sans-serif; }
         .form-group { margin-bottom: 24px; }
         label { display: block; margin-bottom: 8px; font-weight: bold; }
         .input-row { display: flex; align-items: center; gap: 10px; }
@@ -89,15 +92,17 @@
 </head>
 <body>
     <div class="card">
-        <h1>DNSSEC委任状態検証ツール</h1>
-        <p class="lead">親ゾーンの DS と子ゾーンの KSK を元に信頼の連鎖を検証します。</p>
+        <nav class="language-bar" aria-label="Language"><a id="languageLink" href="?lang=en">English</a></nav>
+        <h1 data-en="DNSSEC Delegation Validator">DNSSEC委任状態検証ツール</h1>
+        <p class="lead" data-en="Validate the chain of trust using the parent zone's DS and the child zone's KSK.">親ゾーンの DS と子ゾーンの KSK を元に信頼の連鎖を検証します。</p>
+        <p id="englishNote" class="language-note" hidden>Some detailed server-provided diagnostics may appear in Japanese.</p>
 
         <form id="validateForm">
             <div class="form-group">
-                <label for="domain">検証するドメイン名</label>
+                <label for="domain" data-en="Domain name">検証するドメイン名</label>
                 <div class="input-row">
                     <input type="text" id="domain" placeholder="example.com" autofocus>
-                    <label for="recordType">レコード種別</label>
+                    <label for="recordType" data-en="Record type">レコード種別</label>
                     <select id="recordType">
                         <option value="A">A</option>
                         <option value="AAAA">AAAA</option>
@@ -108,7 +113,7 @@
                         <option value="CAA">CAA</option>
                         <option value="SRV">SRV</option>
                     </select>
-                    <button type="submit">検証スタート</button>
+                    <button type="submit" data-en="Start validation">検証スタート</button>
                 </div>
             </div>
         </form>
@@ -116,11 +121,11 @@
         <div id="statusBox" class="result-status-box"></div>
         <div id="validation-error-details" class="validation-error-details" role="alert"></div>
         <section id="diagram" class="diagram" aria-live="polite">
-            <h2>検証結果の関係図</h2>
-            <div class="apex-summary"><span id="zoneApexSummary">ゾーン頂点：未確認</span></div>
+            <h2 data-en="Validation diagram">検証結果の関係図</h2>
+            <div class="apex-summary"><span id="zoneApexSummary" data-en="Zone apex: not checked">ゾーン頂点：未確認</span></div>
             <div class="diagram-grid">
-                <div class="zone parent-zone"><p id="parentZoneTitle" class="zone-title">親ゾーン / 委任元</p></div>
-                <div class="zone child-zone"><p id="childZoneTitle" class="zone-title">子ゾーン / 委任先</p></div>
+                <div class="zone parent-zone"><p id="parentZoneTitle" class="zone-title" data-en="Parent zone / Delegating zone">親ゾーン / 委任元</p></div>
+                <div class="zone child-zone"><p id="childZoneTitle" class="zone-title" data-en="Child zone / Delegated zone">子ゾーン / 委任先</p></div>
                 <div id="parentDs" class="node parent-ds"></div>
                 <div id="parentRrsig" class="node parent-rrsig"></div>
                 <div id="parentKey" class="node parent-key"></div>
@@ -129,37 +134,37 @@
                 <div id="childARecordValidation" class="node child-a-record-validation"></div>
                 <div id="chainArrow" class="arrow chain-arrow"></div>
             </div>
-            <div class="legend">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
+            <div class="legend" data-en="The arrow label shows the result of verifying the hash between the parent and child zones.">矢印のラベルは、親と子の関係に対するハッシュ値検証の結果です。</div>
             <section id="authorityChecks" class="authority-checks" aria-live="polite">
-                <h2>権威サーバー間の応答比較</h2>
-                <p>親の委任 NS/DS と子の権威 NS/DNSKEY を比較します。RRSIG はこの表の比較対象外です。</p>
+                <h2 data-en="Compare authoritative server responses">権威サーバー間の応答比較</h2>
+                <p data-en="Compares the parent's delegated NS/DS and the child's authoritative NS/DNSKEY. RRSIG records are not compared.">親の委任 NS/DS と子の権威 NS/DNSKEY を比較します。RRSIG はこの表の比較対象外です。</p>
                 <div class="authority-table-wrap">
                     <table>
-                        <thead><tr><th>ネームサーバー</th><th>応答IP</th><th>RRsetの内容（要約）</th></tr></thead>
+                        <thead><tr><th data-en="Name server">ネームサーバー</th><th data-en="Response IP">応答IP</th><th data-en="RRset contents (summary)">RRsetの内容（要約）</th></tr></thead>
                         <tbody id="authorityChecksBody"></tbody>
                     </table>
                 </div>
             </section>
             <section id="dsProposal" class="ds-proposal" aria-live="polite">
-                <h2>CDS/CDNSKEY と親 DS の比較</h2>
+                <h2 data-en="Compare CDS/CDNSKEY with parent DS">CDS/CDNSKEY と親 DS の比較</h2>
                 <div id="dsProposalContent"></div>
                 <ul>
-                    <li>ゾーン頂点の探索で見つけた親側・子側それぞれ 1台の権威サーバーから取得したレコードによる診断です。</li>
-                    <li>親側での自動変更や提案レコードの署名・信頼の検証は行いません。</li>
-                    <li>鍵ロールオーバーでは、以下を確認してください。</li>
+                    <li data-en="This diagnosis uses records retrieved from one parent and one child authoritative server found during zone-apex discovery.">ゾーン頂点の探索で見つけた親側・子側それぞれ 1台の権威サーバーから取得したレコードによる診断です。</li>
+                    <li data-en="This tool does not automatically change the parent or verify the signatures or trust of proposed records.">親側での自動変更や提案レコードの署名・信頼の検証は行いません。</li>
+                    <li data-en="For a key rollover, verify the following:">鍵ロールオーバーでは、以下を確認してください。</li>
                     <ol>
-                        <li>新しい鍵に対応する DS が親に登録されていること。</li>
-                        <li>新しい鍵による DNSKEY の署名を検証できること。</li>
-                        <li>DS と DNSKEY の更新前の情報がキャッシュから消えるまで古い鍵を保持すること。</li>
+                        <li data-en="The DS for the new key is registered with the parent.">新しい鍵に対応する DS が親に登録されていること。</li>
+                        <li data-en="The DNSKEY signature made with the new key can be verified.">新しい鍵による DNSKEY の署名を検証できること。</li>
+                        <li data-en="Keep the old key until cached DS and DNSKEY data from before the update has expired.">DS と DNSKEY の更新前の情報がキャッシュから消えるまで古い鍵を保持すること。</li>
                     </ol>
-                    <li><a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a> の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親の DS RRset 全体を削除する要求です。これが実行されると DNSSEC の信頼の連鎖が途切れるため、意図した変更か確認してください。</li>
+                    <li><span data-en="In ">In </span><a href="https://www.rfc-editor.org/rfc/rfc8078#section-4" target="_blank" rel="noopener noreferrer">RFC 8078 §4</a><span data-en=", CDS 0 0 0 0 / CDNSKEY 0 3 0 0 requests deletion of the entire parent DS RRset. This breaks the DNSSEC chain of trust, so confirm that this change is intended."> の CDS 0 0 0 0 / CDNSKEY 0 3 0 0 は、子から親の DS RRset 全体を削除する要求です。これが実行されると DNSSEC の信頼の連鎖が途切れるため、意図した変更か確認してください。</span></li>
                 </ul>
             </section>
         </section>
     </div>
     <footer class="footer">
         © 2026 <a href="https://x.com/goto_ipv6" target="_blank" rel="noopener noreferrer">Y.Goto</a><br>
-        本ツールは検証・評価目的で提供されています。
+        <span data-en="This tool is provided for testing and evaluation.">本ツールは検証・評価目的で提供されています。</span>
     </footer>
 
     <script src="./dnssec-validator-client.js" defer></script>

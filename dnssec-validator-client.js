@@ -4,8 +4,126 @@ const savedDomainKey = 'dnssec-validator-domain';
 const urlParameters = new URLSearchParams(window.location.search);
 const domainFromUrl = urlParameters.get('domain');
 const recordTypeFromUrl = (urlParameters.get('recordType') || '').toUpperCase();
+const isEnglish = urlParameters.get('lang') === 'en';
 const MAX_DISPLAY_TEXT_LENGTH = 2000;
 const RRSIG_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60;
+
+function translate(value) {
+    let text = String(value ?? '');
+    if (!isEnglish) return text;
+    text = text.replace(/(NSEC\/NSEC3|NSEC3?|DS)による(.+?)証明: (成功 ✓|失敗 ✕)/g, (_match, proofType, kind, result) => {
+        const proofTarget = kind === '名前不在' ? 'absence of name' : kind.replace(/レコード不在/g, ' record absence');
+        return `${proofType} proof for ${proofTarget}: ${result === '成功 ✓' ? 'Passed ✓' : 'Failed ✕'}`;
+    });
+    text = text.replace(/([A-Z]+)レコードへのRRSIGの探索: 失敗 ✕/g, 'No RRSIG found for $1 record: Failed ✕');
+    text = text.replace(/([A-Z]+)レコードの探索: 失敗 ✕/g, 'No $1 record found: Failed ✕');
+    const replacements = [
+        ['検証データを取得できませんでした', 'Could not retrieve validation data'],
+        ['検証できませんでした', 'Validation failed'],
+        ['取得できませんでした', 'Could not retrieve'],
+        ['期限間近（7日以内）: 更新状況を確認してください', 'Expiring within 7 days: check renewal'],
+        ['※DSの署名検証用公開鍵(ZSKの秘密鍵はゾーンのRRsetへの署名に使われる)', 'Public key used to verify DS signatures (the ZSK private key signs zone RRsets).'],
+        ['※DSを対象とする電子署名', 'Signature covering DS records'],
+        ['※子KSKのハッシュ値', 'Hash of the child KSK'],
+        ['※DNSKEY(KSK/ZSK)の署名検証用公開鍵(KSKの秘密鍵はDNSKEY RRsetへの署名に使われる)', 'Public key used to verify DNSKEY signatures (the KSK private key signs the DNSKEY RRset).'],
+        ['※DNSKEY (KSK/ZSK) を対象とする電子署名', 'Signature covering the DNSKEY (KSK/ZSK) RRset'],
+        ['DSなし（ハッシュ照合対象なし）', 'No DS (nothing to compare)'],
+        ['DSなし（親側不在証明: ', 'No DS (parent-side proof of absence: '],
+        ['DSなし', 'No DS'],
+        ['親側不在証明', 'parent-side proof of absence'],
+        ['検証成功', 'Validation succeeded'],
+        ['検証失敗', 'Validation failed'],
+        ['署名検証: 成功', 'Signature verification: passed'],
+        ['署名検証: 失敗', 'Signature verification: failed'],
+        ['信頼の連鎖: 成功', 'Chain of trust: secure'],
+        ['信頼の連鎖: 失敗', 'Chain of trust: failed'],
+        ['DS一致KSKによる署名検証: 失敗', 'Signature verification by DS-matched KSK: failed'],
+        ['による署名検証: 成功', ' signature verification: passed'],
+        ['による署名検証: 失敗', ' signature verification: failed'],
+        ['一致するKSKなし', 'no matching KSK'],
+        ['が一致 ✓', ' matches ✓'],
+        ['一致 ✕', 'does not match ✕'],
+        ['成功 ✓', 'Passed ✓'],
+        ['失敗 ✕', 'Failed ✕'],
+        ['未検証', 'Not verified'],
+        ['未確認', 'Not checked'],
+        ['不整合', 'Inconsistent'],
+        ['期限切れ', 'Expired'],
+        ['期限日時 ', 'Expiration: '],
+        ['残り ', 'Remaining '],
+        ['ドメイン名に対する', 'DNSSEC validation for '],
+        ['レコードDNSSEC検証', ' record'],
+        ['レコードの探索', 'record lookup'],
+        ['レコードへの', 'record '],
+        ['レコード不在', 'record does not exist'],
+        ['名前不在', 'name does not exist'],
+        ['による', ' using '],
+        ['証明:', ' proof:'],
+        ['証明が不足しています', 'The proof is incomplete'],
+        ['応答NSEC3:', 'Observed NSEC3:'],
+        ['応答NSEC:', 'Observed NSEC:'],
+        ['iteration ', 'iterations '],
+        ['署名検証', 'Signature verification'],
+        ['信頼の連鎖', 'Chain of trust'],
+        ['失敗理由:', 'Failure reason:'],
+        ['対応するRRSIGが見つかりませんでした', 'No matching RRSIG found'],
+        ['親に登録されたDS', 'DS registered with parent'],
+        ['親DSと一致', 'Matches parent DS'],
+        ['親DSと差分あり', 'Differs from parent DS'],
+        ['提案なし', 'No proposal'],
+        ['親のDS RRset全体の削除要求', 'Request to delete the entire parent DS RRset'],
+        ['取得・解析失敗', 'Retrieval/parsing failed'],
+        ['子の提案のみ', 'Proposed by child only'],
+        ['親の登録のみ', 'Registered with parent only'],
+        ['親の委任NS RRset', 'Parent delegated NS RRset'],
+        ['親のDS RRset', 'Parent DS RRset'],
+        ['子の権威NS RRset', 'Child authoritative NS RRset'],
+        ['子のDNSKEY RRset', 'Child DNSKEY RRset'],
+        ['サーバー間に差分あり', 'Differences between servers'],
+        ['全台の応答一致', 'All responses match'],
+        ['一部未確認', 'Some responses not checked'],
+        ['取得失敗:', 'Retrieval failed:'],
+        ['未取得', 'Not retrieved'],
+        ['該当RRsetなし', 'No matching RRset'],
+        ['権威サーバー未確認', 'authoritative server not checked'],
+        ['ゾーン頂点：', 'Zone apex: '],
+        ['親ゾーン / 委任元', 'Parent zone / Delegating zone'],
+        ['子ゾーン / 委任先', 'Child zone / Delegated zone'],
+        ['ハッシュ一致', 'Hash matches'],
+        ['ハッシュ不一致', 'Hash mismatch'],
+        ['ハッシュ照合対象なし', 'nothing to compare'],
+        ['Key Tag', 'Key Tag'],
+        ['取得できませんでした', 'Could not retrieve'],
+        ['詳細:', 'Details: ']
+    ];
+    for (const [japanese, english] of replacements) text = text.replaceAll(japanese, english);
+    text = text.replace(/期限日時 (.*?) JST/g, 'Expiration: $1 JST');
+    text = text.replace(/([0-9]+)日/g, '$1d');
+    text = text.replace(/([0-9]+)時間/g, '$1h');
+    text = text.replace(/([0-9]+)分/g, '$1m');
+    return text;
+}
+
+if (isEnglish) {
+    document.documentElement.lang = 'en';
+    document.title = 'DNSSEC Delegation Validator';
+    document.getElementById('englishNote').hidden = false;
+    document.querySelectorAll('[data-en]').forEach(element => {
+        element.textContent = element.dataset.en;
+    });
+    const languageLink = document.getElementById('languageLink');
+    const japaneseUrl = new URL(window.location.href);
+    japaneseUrl.searchParams.delete('lang');
+    languageLink.href = `${japaneseUrl.pathname}${japaneseUrl.search}${japaneseUrl.hash}`;
+    languageLink.textContent = '日本語';
+    languageLink.setAttribute('aria-label', 'Switch to Japanese');
+} else {
+    const englishUrl = new URL(window.location.href);
+    englishUrl.searchParams.set('lang', 'en');
+    const languageLink = document.getElementById('languageLink');
+    languageLink.href = `${englishUrl.pathname}${englishUrl.search}${englishUrl.hash}`;
+    languageLink.setAttribute('aria-label', 'Switch to English');
+}
 
 if ([...recordTypeInput.options].some(option => option.value === recordTypeFromUrl)) {
     recordTypeInput.value = recordTypeFromUrl;
@@ -40,7 +158,7 @@ const dsText = records => !records || records.length === 0 ? ['取得できま�
 function rrsigExpirationText(expiration) {
     if (!Number.isFinite(expiration)) return '';
     const remainingSeconds = expiration - Math.floor(Date.now() / 1000);
-    const expirationDate = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Tokyo' }).format(new Date(expiration * 1000));
+    const expirationDate = new Intl.DateTimeFormat(isEnglish ? 'en-US' : 'ja-JP', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Tokyo' }).format(new Date(expiration * 1000));
     let remainingText;
     if (remainingSeconds <= 0) {
         remainingText = '期限切れ';
@@ -104,16 +222,16 @@ function setNodeContent(nodeId, title, titleColor, lines) {
     const titleElement = document.createElement('div');
     titleElement.className = 'node-title';
     if (titleColor) titleElement.style.color = titleColor;
-    titleElement.textContent = sanitizeDisplayText(title);
+    titleElement.textContent = sanitizeDisplayText(translate(title));
     const metaElement = document.createElement('div');
     metaElement.className = 'node-meta';
-    sanitizeDisplayLines(lines).forEach((line, index) => {
+    sanitizeDisplayLines(lines).map(translate).forEach((line, index) => {
         if (index > 0) metaElement.appendChild(document.createElement('br'));
-        const parts = line.split(/(失敗 ✕|期限間近（7日以内）)/g);
+        const parts = line.split(isEnglish ? /(Failed ✕|Expiring within 7 days: check renewal)/g : /(失敗 ✕|期限間近（7日以内）)/g);
         for (const part of parts) {
-            if (part === '失敗 ✕' || part === '期限間近（7日以内）') {
+            if (part === '失敗 ✕' || part === '期限間近（7日以内）' || part === 'Failed ✕' || part === 'Expiring within 7 days: check renewal') {
                 const marker = document.createElement('span');
-                marker.className = part === '失敗 ✕' ? 'signature-failed' : 'signature-expiring';
+                marker.className = part === '失敗 ✕' || part === 'Failed ✕' ? 'signature-failed' : 'signature-expiring';
                 marker.textContent = part;
                 metaElement.appendChild(marker);
             } else {
@@ -129,7 +247,7 @@ function setLabeledIdentifier(elementId, label, value, suffix = '') {
     const identifier = document.createElement('span');
     identifier.className = 'identifier';
     identifier.textContent = sanitizeDisplayText(value);
-    element.replaceChildren(document.createTextNode(label), identifier, document.createTextNode(suffix));
+    element.replaceChildren(document.createTextNode(translate(label)), identifier, document.createTextNode(translate(suffix)));
 }
 
 function emptyDiagram(domain) {
@@ -145,7 +263,7 @@ function renderDsProposal(diagnosis) {
     const formatDs = record => 'Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' / digest type ' + record.digestType + ' / ' + record.digest;
     const addLine = text => {
         const line = document.createElement('p');
-        line.textContent = sanitizeDisplayText(text);
+        line.textContent = sanitizeDisplayText(translate(text));
         content.appendChild(line);
     };
     addLine('親に登録されたDS: ' + (diagnosis.parentDs.length ? diagnosis.parentDs.map(formatDs).join('、') : diagnosis.cds ? 'なし' : '未確認'));
@@ -182,7 +300,7 @@ function renderAuthorityComparisons(authorityChecks) {
         groupRow.className = 'authority-group-row';
         const groupCell = document.createElement('th');
         groupCell.scope = 'rowgroup';
-        groupCell.textContent = title;
+        groupCell.textContent = translate(title);
         const statusCell = document.createElement('td');
         const status = comparison.hasDifferences
             ? 'サーバー間に差分あり'
@@ -190,7 +308,7 @@ function renderAuthorityComparisons(authorityChecks) {
                 ? '全台の応答一致'
                 : '一部未確認';
         statusCell.className = comparison.hasDifferences ? 'authority-status status-difference' : comparison.complete && comparison.consistent ? 'authority-status status-consistent' : 'authority-status status-incomplete';
-        statusCell.textContent = status;
+        statusCell.textContent = translate(status);
         groupCell.colSpan = 2;
         groupRow.append(groupCell, statusCell);
         tableBody.appendChild(groupRow);
@@ -202,11 +320,11 @@ function renderAuthorityComparisons(authorityChecks) {
             nameCell.textContent = sanitizeDisplayText(server.name);
             const addressCell = document.createElement('td');
             addressCell.className = 'identifier';
-            addressCell.textContent = sanitizeDisplayText(server.ip || '未取得');
+            addressCell.textContent = sanitizeDisplayText(translate(server.ip || '未取得'));
             const recordsCell = document.createElement('td');
-            recordsCell.textContent = server.status === 'error'
+            recordsCell.textContent = translate(server.status === 'error'
                 ? '取得失敗: ' + sanitizeDisplayText(server.error)
-                : (server.records && server.records.length ? sanitizeDisplayLines(server.records).join('、') : '該当RRsetなし') + (server.rcode ? ' / ' + sanitizeDisplayText(server.rcode) : '');
+                : (server.records && server.records.length ? sanitizeDisplayLines(server.records).join('、') : '該当RRsetなし') + (server.rcode ? ' / ' + sanitizeDisplayText(server.rcode) : ''));
             row.append(nameCell, addressCell, recordsCell);
             tableBody.appendChild(row);
         }
@@ -255,10 +373,10 @@ async function validate(event) {
     const statusBox = document.getElementById('statusBox');
     const errorDetailsElement = document.getElementById('validation-error-details');
     try { const url = new URL(domain); if (url.hostname) domain = url.hostname; } catch (error) { }
-    if (!domain) return alert('ドメイン名を入力してください');
+    if (!domain) return alert(translate('ドメイン名を入力してください'));
     statusBox.style.display = 'block';
     statusBox.className = 'result-status-box status-loading';
-    statusBox.innerText = '検証中... (権威サーバーへ直接クエリを送信しています)';
+    statusBox.innerText = isEnglish ? 'Validating... (sending queries directly to authoritative servers)' : '検証中... (権威サーバーへ直接クエリを送信しています)';
     errorDetailsElement.style.display = 'none';
     errorDetailsElement.textContent = '';
     renderDiagram(emptyDiagram(domain));
@@ -267,33 +385,41 @@ async function validate(event) {
         const contentType = response.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
             const bodyText = await response.text();
-            throw new Error(`サーバーから予期しない応答がありました (HTTP ${response.status})。プロキシ/ゲートウェイのタイムアウトなどが考えられます。`, { cause: bodyText });
+            throw new Error(isEnglish
+                ? `Unexpected response from server (HTTP ${response.status}). The proxy or gateway may have timed out.`
+                : `サーバーから予期しない応答がありました (HTTP ${response.status})。プロキシ/ゲートウェイのタイムアウトなどが考えられます。`, { cause: bodyText });
         }
         const data = await response.json();
         if (data.error) {
             statusBox.className = 'result-status-box status-indeterminate';
-            statusBox.innerText = data.statusLabel || '判定不能（エラー）';
+            statusBox.innerText = isEnglish ? 'Indeterminate (error)' : data.statusLabel || '判定不能（エラー）';
             const errorLines = [data.error, ...(data.logs || [])].filter(Boolean);
             if (errorLines.length > 0) {
-                errorDetailsElement.textContent = sanitizeDisplayText(errorLines.join('\n'));
+                errorDetailsElement.textContent = sanitizeDisplayText(isEnglish
+                    ? 'Some diagnostic details are provided by the server in Japanese.\n' + errorLines.join('\n')
+                    : errorLines.join('\n'));
                 errorDetailsElement.style.display = 'block';
             }
             renderDiagram(data.diagram || emptyDiagram(domain));
         } else {
             const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
             statusBox.className = 'result-status-box ' + (statusClasses[data.status] || 'status-indeterminate');
-            statusBox.innerText = data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
+            statusBox.innerText = isEnglish
+                ? ({ secure: 'Secure (validation succeeded)', insecure: 'Insecure (unsigned delegation)', bogus: 'Bogus (DNSSEC validation failed)', indeterminate: data.timedOut ? 'Indeterminate (timeout)' : 'Indeterminate (insufficient validation data)' }[data.status] || 'Indeterminate')
+                : data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
             const detailLines = [...(data.logs || [])];
             if (detailLines.length > 0) {
-                errorDetailsElement.textContent = sanitizeDisplayText(detailLines.join('\n'));
+                errorDetailsElement.textContent = sanitizeDisplayText(isEnglish
+                    ? 'Some diagnostic details are provided by the server in Japanese.\n' + detailLines.join('\n')
+                    : detailLines.join('\n'));
                 errorDetailsElement.style.display = 'block';
             }
             if (data.diagram) renderDiagram(data.diagram);
         }
     } catch (error) {
         statusBox.className = 'result-status-box status-indeterminate';
-        statusBox.innerText = '判定不能（通信エラー）';
-        errorDetailsElement.textContent = sanitizeDisplayText('詳細: ' + (error && error.message ? error.message : String(error)));
+        statusBox.innerText = isEnglish ? 'Indeterminate (communication error)' : '判定不能（通信エラー）';
+        errorDetailsElement.textContent = sanitizeDisplayText(translate((isEnglish ? 'Details: ' : '詳細: ') + (error && error.message ? error.message : String(error))));
         errorDetailsElement.style.display = 'block';
         renderDiagram(emptyDiagram(domain));
     }
