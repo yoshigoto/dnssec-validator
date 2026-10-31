@@ -10,7 +10,8 @@ import dnsPacket from 'dns-packet';	// https://github.com/mafintosh/dns-packet
 import dnsTypes from 'dns-packet/types.js';
 import {
     ROOT_SERVER_BOOTSTRAP_IP,
-    getReferralAddressRecords,
+    getReferralNameserverCandidates,
+    isValidReferral,
     isInBailiwickGlue,
     isPublicDnsServerAddress as isPublicUnicastAddress,
     normalizeDnsName as normalizeResolverDnsName,
@@ -512,7 +513,7 @@ async function getZoneApex(domain, options = {}) {
                     break;
                 }
                 // referral は問い合わせ名の上位で、かつ現在のゾーンより下位の委任でなければならない (bailiwick 検証)
-                if (!isSameOrAncestorZone(delegationZone, domain) || !isSameOrAncestorZone(lastDelegationZone, delegationZone)) {
+                if (!isValidReferral(delegationZone, lastDelegationZone, domain)) {
                     if (!lastDelegationZone) throw new Error(`問い合わせ名と無関係な委任 [${delegationZone}] が返されました`);
                     discoveryError = `問い合わせ名と無関係な委任 [${delegationZone}] が返されたため、探索を中断しました。`;
                     break;
@@ -523,9 +524,13 @@ async function getZoneApex(domain, options = {}) {
                 // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
-                for (const nsRecord of nsRecords) {
-                    const nsNames = [normalizeResolverDnsName(nsRecord.data)];
-                    const glueA = additionals.find(record => record.type === 'A' && isInBailiwickGlue(record, nsNames, nsRecord.name));
+                const referral = getReferralNameserverCandidates(nsRecords, additionals, nsRecords[0].name, {
+                    gluePolicy: 'strict',
+                    serverZone: isRootNameserver ? '.' : nsRecords[0].name,
+                    addressTypes: ['A']
+                });
+                for (const { nsRecord, nsName, addressRecords } of referral.candidates) {
+                    const glueA = addressRecords.find(record => isInBailiwickGlue(record, [nsName], nsRecord.name));
                     if (glueA) {
                         chosenNsRecord = nsRecord;
                         chosenNsIp = glueA.data;
@@ -533,15 +538,7 @@ async function getZoneApex(domain, options = {}) {
                     }
                 }
                 if (!chosenNsRecord) {
-                    const delegationZone = nsRecords[0].name;
-                    const referralAddresses = getReferralAddressRecords(
-                        additionals,
-                        nsRecords.map(record => record.data),
-                        delegationZone,
-                        'strict',
-                        isRootNameserver ? '.' : delegationZone
-                    );
-                    const referralA = referralAddresses.find(record => record.type === 'A');
+                    const referralA = referral.addressRecords[0];
                     if (referralA) {
                         chosenNsRecord = nsRecords.find(record => normalizeResolverDnsName(record.data) === normalizeResolverDnsName(referralA.name));
                         chosenNsIp = referralA.data;
