@@ -1926,6 +1926,7 @@ test('公開ネームサーバーへのUDP問い合わせは共有ポリシー�
                 answers: [{
                     name: 'example.test',
                     type: 'SOA',
+                    ttl: 30,
                     data: {
                         mname: 'ns.example.test',
                         rname: 'hostmaster.example.test',
@@ -1942,7 +1943,8 @@ test('公開ネームサーバーへのUDP問い合わせは共有ポリシー�
         return socket;
     });
 
-    const result = await queryPublicNameserverUDP('example.test', '8.8.8.8', new Map(), 'SOA', {
+    const cache = new Map();
+    const result = await queryPublicNameserverUDP('example.test', '8.8.8.8', cache, 'SOA', {
         isAllowedServerIP: () => false,
         use0x20: false,
         timeoutMs: 1000
@@ -1953,6 +1955,14 @@ test('公開ネームサーバーへのUDP問い合わせは共有ポリシー�
     assert.equal(result.transport, 'tcp');
     assert.equal(result.isFallback, true);
     assert.equal(result.answers[0].type, 'SOA');
+    const cached = await queryDirectlyUDP('example.test', '8.8.8.8', cache, 'SOA', {
+        isAllowedServerIP: isPublicDnsServerAddress,
+        use0x20: false,
+        timeoutMs: 1000
+    });
+    assert.equal(cached.isCached, true);
+    assert.equal(udpRequests, 1);
+    assert.equal(tcpConnections, 1);
 });
 
 test('TCPフォールバックはUDP後に変更されたネームサーバーポリシーを再検査する', async t => {
