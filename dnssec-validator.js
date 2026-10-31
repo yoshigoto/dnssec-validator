@@ -12,6 +12,7 @@ import {
     ROOT_SERVER_BOOTSTRAP_IP,
     getReferralAddressRecords,
     isInBailiwickGlue,
+    isPublicDnsServerAddress as isPublicUnicastAddress,
     normalizeDnsName as normalizeResolverDnsName,
     queryDirectlyUDP,
     resolveHostnameIPv4Self
@@ -64,33 +65,6 @@ const MAX_RSA_EXPONENT_BYTES = 8; // 巨大な公開指数による検証コス�
 const MAX_NAMESERVERS_PER_ZONE = 16; // 比較・解決の対象とする NS 名の上限 (大量 NS による増幅対策)
 const MAX_PARENT_DS_QUERY_SERVERS = 4;
 
-// --- 問い合わせ先として許可しない内部・特殊用途アドレス (DNS 経由の SSRF 対策) ---
-const BLOCKED_NAMESERVER_ADDRESSES = new net.BlockList();
-for (const [address, prefix] of [
-    ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
-    ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16],
-    ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4]
-]) {
-    BLOCKED_NAMESERVER_ADDRESSES.addSubnet(address, prefix, 'ipv4');
-}
-for (const [address, prefix] of [
-    ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64],
-    ['2001:db8::', 32], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]
-]) {
-    BLOCKED_NAMESERVER_ADDRESSES.addSubnet(address, prefix, 'ipv6');
-}
-
-function isPublicUnicastAddress(address) {
-    const family = net.isIP(address);
-    if (family === 0) return false;
-    if (family === 6) {
-        // net.BlockList は ::ffff:0:0/96 を IPv4 全体と同一視するため、IPv4 射影アドレスは個別に判定して拒否する
-        const hextets = getIPv6Hextets(address);
-        if (hextets.slice(0, 5).every(value => value === 0) && hextets[5] === 0xffff) return false;
-    }
-    return !BLOCKED_NAMESERVER_ADDRESSES.check(address, family === 4 ? 'ipv4' : 'ipv6');
-}
-
 function getIPv6Hextets(address) {
     const [head, tail] = address.split('%')[0].split('::');
     const toHextets = part => (part ? part.split(':') : []).flatMap(piece => {
@@ -111,19 +85,20 @@ const validationContext = new AsyncLocalStorage();
 function queryPublicNameserverUDP(domain, serverIp, dnsResponseCache, qType, queryOptions) {
     if (!isPublicUnicastAddress(serverIp)) {
         return Promise.resolve({
-            error: 'BLOCKED_ADDRESS',
+            error: 'BLOCKED_ADDRESS', name: domain, serverIp, qType, transport: 'udp', retryable: false,
             detail: `問い合わせ先 ${serverIp} は内部・特殊用途のアドレスのため拒否しました`
         });
     }
+    const baseOptions = typeof queryOptions === 'boolean' ? { useEdns: queryOptions } : { ...(queryOptions || {}) };
+    const options = { ...baseOptions, isAllowedServerIP: isPublicUnicastAddress };
     const signal = validationContext.getStore()?.signal;
     if (signal) {
         if (signal.aborted) {
             return Promise.resolve({ error: 'ABORTED', detail: '検証処理の制限時間を超えたため問い合わせを中止しました' });
         }
-        const baseOptions = typeof queryOptions === 'boolean' ? { useEdns: queryOptions } : { ...(queryOptions || {}) };
-        return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, { ...baseOptions, signal });
+        return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, { ...options, signal });
     }
-    return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, queryOptions);
+    return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, options);
 }
 
 function isSameOrAncestorZone(zone, name) {
@@ -397,8 +372,13 @@ async function getARecord(domain, options = {}) {
     }
 
     const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
+    const queryUdp = options.queryDirectlyUDP || queryPublicNameserverUDP;
     const ipAddress = await resolveIPv4(domain, {
-        queryDirectlyUDP: options.queryDirectlyUDP || queryPublicNameserverUDP,
+        queryDirectlyUDP: queryUdp,
+        ...(queryUdp === queryPublicNameserverUDP ? {
+            isAllowedServerIP: isPublicUnicastAddress,
+            signal: validationContext.getStore()?.signal
+        } : {}),
         knownAddresses: options.knownAddresses,
         dnsResponseCache: options.dnsResponseCache
     });
@@ -429,6 +409,10 @@ async function getZoneApex(domain, options = {}) {
         try {
             currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
                 queryDirectlyUDP: queryUdp,
+                ...(queryUdp === queryPublicNameserverUDP ? {
+                    isAllowedServerIP: isPublicUnicastAddress,
+                    signal: validationContext.getStore()?.signal
+                } : {}),
                 knownAddresses: options.knownAddresses,
                 dnsResponseCache
             });
