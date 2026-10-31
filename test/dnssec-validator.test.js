@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { once } from 'node:events';
+import dgram from 'node:dgram';
+import { EventEmitter, once } from 'node:events';
 import http from 'node:http';
+import net from 'node:net';
 import test from 'node:test';
 
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
 import dnsPacket from 'dns-packet';
-import { isPublicDnsServerAddress, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
+import { isPublicDnsServerAddress, queryDirectlyUDP, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
 
 import {
     app,
@@ -1889,6 +1891,128 @@ test('内部・特殊用途アドレスのネームサーバーには問い合�
     const blocked = await queryPublicNameserverUDP('example.test', '10.0.0.53', new Map(), 'SOA', {});
     assert.equal(blocked.error, 'BLOCKED_ADDRESS');
     await assert.rejects(getResourceRecord('example.test', '127.0.0.1', 'DS'), /BLOCKED_ADDRESS/);
+});
+
+test('公開ネームサーバーへのUDP問い合わせは共有ポリシーを適用してTCPへフォールバックする', async t => {
+    let udpRequests = 0;
+    let tcpConnections = 0;
+    t.mock.method(dgram, 'createSocket', () => {
+        const socket = new EventEmitter();
+        socket.bind = (_options, callback) => queueMicrotask(callback);
+        socket.close = () => {};
+        socket.send = (buffer, offset, length, port, address, callback) => {
+            udpRequests++;
+            callback(null);
+            const query = dnsPacket.decode(buffer);
+            queueMicrotask(() => socket.emit('message', dnsPacket.encode({
+                type: 'response',
+                id: query.id,
+                questions: query.questions,
+                flags: dnsPacket.TRUNCATED_RESPONSE
+            }), { address, port }));
+        };
+        return socket;
+    });
+    t.mock.method(net, 'createConnection', (_options, onConnect) => {
+        tcpConnections++;
+        const socket = new EventEmitter();
+        socket.destroy = () => {};
+        socket.write = buffer => {
+            const query = dnsPacket.streamDecode(buffer);
+            queueMicrotask(() => socket.emit('data', dnsPacket.streamEncode({
+                type: 'response',
+                id: query.id,
+                questions: query.questions,
+                answers: [{
+                    name: 'example.test',
+                    type: 'SOA',
+                    data: {
+                        mname: 'ns.example.test',
+                        rname: 'hostmaster.example.test',
+                        serial: 1,
+                        refresh: 3600,
+                        retry: 600,
+                        expire: 86400,
+                        minimum: 300
+                    }
+                }]
+            })));
+        };
+        queueMicrotask(onConnect);
+        return socket;
+    });
+
+    const result = await queryPublicNameserverUDP('example.test', '8.8.8.8', new Map(), 'SOA', {
+        isAllowedServerIP: () => false,
+        use0x20: false,
+        timeoutMs: 1000
+    });
+
+    assert.equal(udpRequests, 1);
+    assert.equal(tcpConnections, 1);
+    assert.equal(result.transport, 'tcp');
+    assert.equal(result.isFallback, true);
+    assert.equal(result.answers[0].type, 'SOA');
+});
+
+test('TCPフォールバックはUDP後に変更されたネームサーバーポリシーを再検査する', async t => {
+    let allowed = true;
+    let tcpConnections = 0;
+    t.mock.method(dgram, 'createSocket', () => {
+        const socket = new EventEmitter();
+        socket.bind = (_options, callback) => queueMicrotask(callback);
+        socket.close = () => {};
+        socket.send = (buffer, offset, length, port, address, callback) => {
+            callback(null);
+            const query = dnsPacket.decode(buffer);
+            allowed = false;
+            queueMicrotask(() => socket.emit('message', dnsPacket.encode({
+                type: 'response',
+                id: query.id,
+                questions: query.questions,
+                flags: dnsPacket.TRUNCATED_RESPONSE
+            }), { address, port }));
+        };
+        return socket;
+    });
+    t.mock.method(net, 'createConnection', () => {
+        tcpConnections++;
+        return assert.fail('blocked TCP fallback must not connect');
+    });
+
+    const result = await queryDirectlyUDP('example.test', '8.8.8.8', new Map(), 'SOA', {
+        isAllowedServerIP: () => allowed,
+        use0x20: false,
+        timeoutMs: 1000
+    });
+
+    assert.equal(result.error, 'BLOCKED_ADDRESS');
+    assert.equal(result.transport, 'tcp');
+    assert.equal(result.retryFrom, 'udp-truncated');
+    assert.equal(tcpConnections, 0);
+});
+
+test('Aレコードとゾーン頂点のNS解決は共有ポリシーと検証中のAbortSignalを渡す', async () => {
+    const controller = new AbortController();
+    const receivedDependencies = new Map();
+    const resolveHostnameIPv4Self = async (hostname, dependencies) => {
+        receivedDependencies.set(hostname, dependencies);
+        return hostname === 'ns.a-record.test' ? '8.8.8.8' : null;
+    };
+
+    await validationContext.run({ signal: controller.signal }, async () => {
+        assert.equal(await getARecord('ns.a-record.test', { resolveHostnameIPv4Self }), '8.8.8.8');
+        await assert.rejects(getZoneApex('www.zone-apex.test', {
+            initialNameserver: 'ns.zone-apex.test',
+            resolveHostnameIPv4Self
+        }), /ネームサーバー \[ns\.zone-apex\.test\] の IP アドレスを自己解決できません/);
+    });
+
+    for (const hostname of ['ns.a-record.test', 'ns.zone-apex.test']) {
+        const dependencies = receivedDependencies.get(hostname);
+        assert.equal(dependencies.isAllowedServerIP, isPublicUnicastAddress);
+        assert.equal(dependencies.signal, controller.signal);
+    }
 });
 
 test('問い合わせ名の上位ではないSOA所有者名をゾーン頂点として採用しない', async () => {
