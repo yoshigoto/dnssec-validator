@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
 import dnsPacket from 'dns-packet';
-import { ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
+import { isPublicDnsServerAddress, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
 
 import {
     app,
@@ -1878,7 +1878,9 @@ test('多数のラベルとNSEC3パラメーターによるNXDOMAIN解析は計�
 });
 
 test('内部・特殊用途アドレスのネームサーバーには問い合わせない', async () => {
-    for (const address of ['10.0.0.53', '127.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '100.64.0.1', '::1', 'fd00::1', 'fe80::1', '::ffff:10.0.0.1', '0.0.0.0', 'not-an-ip']) {
+    assert.equal(isPublicUnicastAddress, isPublicDnsServerAddress);
+    for (const address of ['10.0.0.53', '127.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '100.64.0.1', '::1', 'fd00::1', 'fe80::1', '::ffff:10.0.0.1', '0.0.0.0', 'not-an-ip',
+        '2001::1', '2001:2::1', '2001:10::1', '2001:20::1', '3fff::1', '4000::1', '2001:500:2::c%eth0']) {
         assert.equal(isPublicUnicastAddress(address), false, address);
     }
     for (const address of ['198.41.0.4', '8.8.8.8', '2001:500:2::c']) {
