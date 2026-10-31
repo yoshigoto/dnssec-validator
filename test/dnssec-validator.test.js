@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa.js';
 import dnsPacket from 'dns-packet';
-import { isPublicDnsServerAddress, queryDirectlyUDP, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
+import { createQueryBudget, isPublicDnsServerAddress, queryDirectlyUDP, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
 
 import {
     app,
@@ -1944,23 +1944,34 @@ test('公開ネームサーバーへのUDP問い合わせは共有ポリシー�
     });
 
     const cache = new Map();
-    const result = await queryPublicNameserverUDP('example.test', '8.8.8.8', cache, 'SOA', {
-        isAllowedServerIP: () => false,
-        use0x20: false,
-        timeoutMs: 1000
-    });
+    const queryBudget = createQueryBudget(2);
+    const controller = new AbortController();
+    const options = { isAllowedServerIP: () => false, use0x20: false, timeoutMs: 1000 };
+    const result = await validationContext.run({ signal: controller.signal, queryBudget }, () =>
+        queryPublicNameserverUDP('example.test', '8.8.8.8', cache, 'SOA', options));
 
     assert.equal(udpRequests, 1);
     assert.equal(tcpConnections, 1);
     assert.equal(result.transport, 'tcp');
     assert.equal(result.isFallback, true);
     assert.equal(result.answers[0].type, 'SOA');
+    assert.equal(queryBudget.remaining, 0);
+    assert.equal(queryBudget.exhausted, false);
     const cached = await queryDirectlyUDP('example.test', '8.8.8.8', cache, 'SOA', {
         isAllowedServerIP: isPublicDnsServerAddress,
         use0x20: false,
         timeoutMs: 1000
     });
     assert.equal(cached.isCached, true);
+    assert.equal(udpRequests, 1);
+    assert.equal(tcpConnections, 1);
+    await validationContext.run({ signal: controller.signal, queryBudget }, async () => {
+        assert.equal((await queryPublicNameserverUDP('example.test', '8.8.8.8', cache, 'SOA', options)).isCached, true);
+        const blocked = await queryPublicNameserverUDP('other-budget.test', '8.8.8.8', cache, 'SOA',
+            { ...options, queryBudget: createQueryBudget(1000) });
+        assert.equal(blocked.error, 'QUERY_LIMIT_EXCEEDED');
+    });
+    assert.equal(queryBudget.exhausted, true);
     assert.equal(udpRequests, 1);
     assert.equal(tcpConnections, 1);
 });
@@ -2004,13 +2015,14 @@ test('TCPフォールバックはUDP後に変更されたネームサーバー�
 
 test('Aレコードとゾーン頂点のNS解決は共有ポリシーと検証中のAbortSignalを渡す', async () => {
     const controller = new AbortController();
+    const queryBudget = createQueryBudget(1000);
     const receivedDependencies = new Map();
     const resolveHostnameIPv4Self = async (hostname, dependencies) => {
         receivedDependencies.set(hostname, dependencies);
         return hostname === 'ns.a-record.test' ? '8.8.8.8' : null;
     };
 
-    await validationContext.run({ signal: controller.signal }, async () => {
+    await validationContext.run({ signal: controller.signal, queryBudget }, async () => {
         assert.equal(await getARecord('ns.a-record.test', { resolveHostnameIPv4Self }), '8.8.8.8');
         await assert.rejects(getZoneApex('www.zone-apex.test', {
             initialNameserver: 'ns.zone-apex.test',
@@ -2022,7 +2034,60 @@ test('Aレコードとゾーン頂点のNS解決は共有ポリシーと検証�
         const dependencies = receivedDependencies.get(hostname);
         assert.equal(dependencies.isAllowedServerIP, isPublicUnicastAddress);
         assert.equal(dependencies.signal, controller.signal);
+        assert.equal(dependencies.queryBudget, queryBudget);
     }
+});
+
+test('APIは検証ごとに1000送信を許可し、超過時は判定不能として別リクエストの予算と分離する', async t => {
+    let sends = 0;
+    const budgets = [];
+    t.mock.method(dgram, 'createSocket', () => {
+        const socket = new EventEmitter();
+        socket.bind = (_options, callback) => queueMicrotask(callback);
+        socket.close = () => {};
+        socket.send = (buffer, offset, length, port, address, callback) => {
+            sends++;
+            callback(null);
+            const query = dnsPacket.decode(buffer);
+            queueMicrotask(() => socket.emit('message', dnsPacket.encode({
+                type: 'response', id: query.id, questions: query.questions
+            }), { address, port }));
+        };
+        return socket;
+    });
+    await withValidationDependencies({
+        getZoneApex: async domain => {
+            const { queryBudget } = validationContext.getStore();
+            budgets.push(queryBudget);
+            assert.equal(queryBudget.remaining, 1000);
+            const cache = new Map();
+            for (let index = 0; index <= 1000; index++) {
+                const result = await queryPublicNameserverUDP(`${index}.api-budget.test`,
+                    '8.8.8.8', cache, 'SOA', { use0x20: false });
+                assert.equal(result.error, index === 1000 ? 'QUERY_LIMIT_EXCEEDED' : undefined);
+            }
+            if (domain.startsWith('two.')) throw new Error('QUERY_LIMIT_EXCEEDED');
+            return { zoneApex: '', currentNs: 'ns.api-budget.test', rcode: '' };
+        }
+    }, async server => {
+        const responses = await Promise.all([
+            postValidate(server, 'one.api-budget.test', '198.51.100.31'),
+            postValidate(server, 'two.api-budget.test', '198.51.100.32')
+        ]);
+        for (const response of responses) {
+            assert.equal(response.statusCode, 200);
+            const result = JSON.parse(response.body);
+            assert.equal(result.success, false);
+            assert.equal(result.error, 'QUERY_LIMIT_EXCEEDED');
+            assert.equal(result.queryLimitExceeded, true);
+            assert.equal(result.status, 'indeterminate');
+            assert.match(result.logs.join('\n'), /送信数の上限 \(1000\)/);
+        }
+    });
+    assert.equal(sends, 2000);
+    assert.equal(budgets.length, 2);
+    assert.notEqual(budgets[0], budgets[1]);
+    assert.ok(budgets.every(budget => budget.remaining === 0 && budget.exhausted));
 });
 
 test('問い合わせ名の上位ではないSOA所有者名をゾーン頂点として採用しない', async () => {
