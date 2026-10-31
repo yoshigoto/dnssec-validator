@@ -214,6 +214,24 @@ for (const [status, className] of [
     });
 }
 
+for (const language of ['ja', 'en']) {
+    test(`${language}: DNS送信予算の超過は判定不能として表示し、不完全な図とログを保持する`, async t => {
+        const result = {
+            ...makeResult('indeterminate'),
+            success: false, error: 'QUERY_LIMIT_EXCEEDED', queryLimitExceeded: true,
+            statusLabel: '判定不能（問い合わせ上限）',
+            logs: ['DNS メッセージ送信数の上限 (1000) に達したため、検証結果は不完全です。']
+        };
+        const ui = createUi(t, { search: `?lang=${language}`, respond: () => jsonResponse(result) });
+        await ui.submit();
+        assert.equal(ui.element('statusBox').innerText, language === 'en'
+            ? 'Indeterminate (DNS transmission limit)' : result.statusLabel);
+        assert.equal(ui.element('statusBox').classList.contains('status-indeterminate'), true);
+        assert.match(ui.element('validation-error-details').textContent, /QUERY_LIMIT_EXCEEDED.*\nDNS メッセージ送信数/);
+        assert.equal(ui.element('diagram').style.display, 'block');
+    });
+}
+
 test('JSONエラー・HTTP 429の詳細を表示する', async t => {
     const ui = createUi(t, { respond: () => jsonResponse({
         error: 'リクエスト制限に達しました。', logs: ['60秒後に再試行'],

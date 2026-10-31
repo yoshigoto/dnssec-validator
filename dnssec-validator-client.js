@@ -392,7 +392,9 @@ async function validate(event) {
         const data = await response.json();
         if (data.error) {
             statusBox.className = 'result-status-box status-indeterminate';
-            statusBox.innerText = isEnglish ? 'Indeterminate (error)' : data.statusLabel || '判定不能（エラー）';
+            statusBox.innerText = isEnglish
+                ? data.queryLimitExceeded ? 'Indeterminate (DNS transmission limit)' : 'Indeterminate (error)'
+                : data.statusLabel || '判定不能（エラー）';
             const errorLines = [data.error, ...(data.logs || [])].filter(Boolean);
             if (errorLines.length > 0) {
                 errorDetailsElement.textContent = sanitizeDisplayText(isEnglish

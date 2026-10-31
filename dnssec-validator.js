@@ -14,6 +14,7 @@ import {
     isInBailiwickGlue,
     isPublicDnsServerAddress as isPublicUnicastAddress,
     normalizeDnsName as normalizeResolverDnsName,
+    createQueryBudget,
     queryDirectlyUDP,
     resolveHostnameIPv4Self
 } from 'dns-self-resolver';
@@ -47,6 +48,7 @@ const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
 const rateLimitMap = new Map(); // クライアントキー (IPv4 アドレス / IPv6 /64): { count, resetTime }
 const API_VALIDATE_TIMEOUT_MS = 25000; // ホスティング基盤側のゲートウェイタイムアウト(HTMLエラーページ化)より先に必ずJSONで応答するための上限
+const MAX_QUERIES_PER_VALIDATION = 1000;
 const VALIDATION_RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'CAA', 'SRV'];
 const MAX_CONCURRENT_VALIDATIONS = 16; // タイムアウト応答後も続く検証処理を含めた同時実行数の上限
 const MAX_CONCURRENT_VALIDATIONS_PER_CLIENT = 2; // 1クライアントで全体の実行枠を占有させない
@@ -78,7 +80,7 @@ function getIPv6Hextets(address) {
     return [...headHextets, ...new Array(Math.max(0, 8 - headHextets.length - tailHextets.length)).fill(0), ...tailHextets];
 }
 
-// 検証リクエストごとの AbortSignal。制限時間を超えた検証の以降の DNS 問い合わせを即座に打ち切り、実行枠を早く解放する
+// 検証リクエストごとの AbortSignal と、再送も含めた DNS メッセージ送信予算。
 const validationContext = new AsyncLocalStorage();
 
 // 攻撃者が glue / NS 名の A レコードで指定した内部アドレスへ問い合わせないよう、送信直前に宛先を検査する
@@ -91,7 +93,8 @@ function queryPublicNameserverUDP(domain, serverIp, dnsResponseCache, qType, que
     }
     const baseOptions = typeof queryOptions === 'boolean' ? { useEdns: queryOptions } : { ...(queryOptions || {}) };
     const options = { ...baseOptions, isAllowedServerIP: isPublicUnicastAddress };
-    const signal = validationContext.getStore()?.signal;
+    const { signal, queryBudget } = validationContext.getStore() || {};
+    if (queryBudget) options.queryBudget = queryBudget;
     if (signal) {
         if (signal.aborted) {
             return Promise.resolve({ error: 'ABORTED', detail: '検証処理の制限時間を超えたため問い合わせを中止しました' });
@@ -173,7 +176,10 @@ function withConcurrencyLimit(handler) {
         const abortController = new AbortController();
         res.locals.validationAbortController = abortController;
         try {
-            await validationContext.run({ signal: abortController.signal }, () => handler(req, res, next));
+            await validationContext.run({
+                signal: abortController.signal,
+                queryBudget: createQueryBudget(MAX_QUERIES_PER_VALIDATION)
+            }, () => handler(req, res, next));
         } finally {
             activeValidations--;
             const remaining = (activeValidationsByClient.get(clientKey) || 1) - 1;
@@ -377,7 +383,8 @@ async function getARecord(domain, options = {}) {
         queryDirectlyUDP: queryUdp,
         ...(queryUdp === queryPublicNameserverUDP ? {
             isAllowedServerIP: isPublicUnicastAddress,
-            signal: validationContext.getStore()?.signal
+            signal: validationContext.getStore()?.signal,
+            queryBudget: validationContext.getStore()?.queryBudget
         } : {}),
         knownAddresses: options.knownAddresses,
         dnsResponseCache: options.dnsResponseCache
@@ -411,7 +418,8 @@ async function getZoneApex(domain, options = {}) {
                 queryDirectlyUDP: queryUdp,
                 ...(queryUdp === queryPublicNameserverUDP ? {
                     isAllowedServerIP: isPublicUnicastAddress,
-                    signal: validationContext.getStore()?.signal
+                    signal: validationContext.getStore()?.signal,
+                    queryBudget: validationContext.getStore()?.queryBudget
                 } : {}),
                 knownAddresses: options.knownAddresses,
                 dnsResponseCache
@@ -1623,7 +1631,21 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
             true
         );
     });
-    const sendJson = (statusCode, payload) => sendJsonRaw(statusCode, addClassification(payload));
+    const sendJson = (statusCode, payload) => {
+        if (validationContext.getStore()?.queryBudget?.exhausted) {
+            return sendJsonRaw(200, {
+                ...payload,
+                success: false,
+                error: 'QUERY_LIMIT_EXCEEDED',
+                queryLimitExceeded: true,
+                logs: [...(payload.logs || []), `DNS メッセージ送信数の上限 (${MAX_QUERIES_PER_VALIDATION}) に達したため、検証結果は不完全です。`],
+                status: 'indeterminate',
+                statusLabel: '判定不能（問い合わせ上限）',
+                nextChecks: ['問い合わせ数が多い委任構成や権威サーバーの応答状況を確認してください。']
+            });
+        }
+        return sendJsonRaw(statusCode, addClassification(payload));
+    };
 
     try {
         // 1. ドメイン名からゾーン頂点を取得
@@ -2011,6 +2033,9 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
         sendJson(200, { success, logs, diagram });
 
     } catch (err) {
+        if (validationContext.getStore()?.queryBudget?.exhausted) {
+            return sendJson(200, { success: false, logs, diagram });
+        }
         console.error('検証処理で予期しないエラーが発生しました:', err);
         const errorMsg = '予期しないエラーが発生しました。時間をおいて再度お試しください。';
         logs.push(errorMsg);
