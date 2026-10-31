@@ -5,12 +5,34 @@ import net from 'node:net';
 import test from 'node:test';
 
 import dnsPacket from 'dns-packet';
-import { queryDirectlyUDP, ROOT_SERVER_BOOTSTRAP_IP } from 'dns-self-resolver';
+import {
+    isPublicDnsServerAddress, queryDirectlyUDP,
+    resolveHostnameIPv4Self, resolveServerIPs, ROOT_SERVER_BOOTSTRAP_IP
+} from 'dns-self-resolver';
 
 import { getARecord, getResourceRecord, getZoneApex } from '../dnssec-validator.js';
 
 const LOCALHOST = '127.0.0.1';
 const TEST_TIMEOUT_MS = 5000;
+
+test('固定依存先は非公開のみのNS回答をTTL内で再利用する', async () => {
+    let queries = 0;
+    const query = async (name, ip, cache, type) => {
+        queries++;
+        assert.equal(isPublicDnsServerAddress(ip), true);
+        return {
+            answers: type === 'A' ? [{ name, type, data: '10.0.0.53', ttl: 30 }] : [],
+            flags: dnsPacket.AUTHORITATIVE_ANSWER
+        };
+    };
+    const dependencies = { isAllowedServerIP: isPublicDnsServerAddress, queryDirectlyUDP: query };
+    assert.equal(await resolveServerIPs('blocked.validator-dependency.test', dependencies), null);
+    const completed = queries;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        assert.equal(await resolveHostnameIPv4Self('blocked.validator-dependency.test', dependencies), null);
+    }
+    assert.equal(queries, completed);
+});
 
 async function startDnsServer(t, respond) {
     const udp = dgram.createSocket('udp4');
