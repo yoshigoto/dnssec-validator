@@ -755,6 +755,60 @@ test('ルート referral の TLD glue を使って次の権威サーバーへ進
     assert.equal(result.zoneApex, 'com');
 });
 
+for (const scenario of [
+    { label: 'in-domain AはNS順で優先', initial: ROOT_SERVER_BOOTSTRAP_IP,
+        ns: ['ns2.com', 'ns1.com'], addresses: [
+            { name: 'ns1.com', type: 'A', data: '192.0.2.1' },
+            { name: 'ns2.com', type: 'A', data: '192.0.2.2' }
+        ], expected: '192.0.2.2' },
+    { label: 'ルート例外よりin-domain Aを優先', initial: ROOT_SERVER_BOOTSTRAP_IP,
+        ns: ['external.net', 'ns1.com'], addresses: [
+            { name: 'external.net', type: 'A', data: '192.0.2.3' },
+            { name: 'ns1.com', type: 'A', data: '192.0.2.1' }
+        ], expected: '192.0.2.1' },
+    { label: 'ルート例外のAはADDITIONAL順', initial: ROOT_SERVER_BOOTSTRAP_IP,
+        ns: ['ns1.external.net', 'ns2.external.net'], addresses: [
+            { name: 'ns2.external.net', type: 'A', data: '192.0.2.2' },
+            { name: 'ns1.external.net', type: 'A', data: '192.0.2.1' }
+        ], expected: '192.0.2.2' },
+    { label: 'ルート以外ではout-of-domain Aを使わない', initial: '192.0.2.10',
+        ns: ['ns1.external.net', 'ns2.external.net'], addresses: [
+            { name: 'ns2.external.net', type: 'A', data: '192.0.2.2' }
+        ], expected: '192.0.2.53', resolved: 'ns1.external.net' },
+    { label: 'AAAAだけなら最初のNS名をIPv4自己解決', initial: ROOT_SERVER_BOOTSTRAP_IP,
+        ns: ['NS1.COM.', 'ns2.com'], addresses: [
+            { name: 'ns2.com', type: 'AAAA', data: '2001:db8::2' },
+            { name: 'ns1.com', type: 'AAAA', data: '2001:db8::1' }
+        ], expected: '192.0.2.53', resolved: 'NS1.COM.' }
+]) {
+    test(`共通referral候補でもDNSSEC探索は1候補を選択: ${scenario.label}`, async () => {
+        const queried = [];
+        const resolved = [];
+        const result = await getZoneApex('com', {
+            initialNameserver: scenario.initial,
+            resolveHostnameIPv4Self: async name => {
+                resolved.push(name);
+                return '192.0.2.53';
+            },
+            queryDirectlyUDP: async (name, serverIp) => {
+                queried.push(serverIp);
+                return queried.length === 1 ? {
+                    rcode: 'NOERROR', flags: 0,
+                    authorities: scenario.ns.map(data => ({ name: 'COM.', type: 'NS', data })),
+                    additionals: scenario.addresses
+                } : {
+                    rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                    answers: [{ name: 'com', type: 'SOA', data: {} }]
+                };
+            }
+        });
+        assert.deepEqual(queried, [scenario.initial, scenario.expected]);
+        assert.deepEqual(resolved, scenario.resolved ? [scenario.resolved] : []);
+        assert.equal(result.zoneApex, 'com');
+        assert.deepEqual(result.childNameservers, scenario.ns);
+    });
+}
+
 test('共有リゾルバーへDOビット付き問い合わせを渡してDNSSECリソースレコードを抽出する', async () => {
     const result = await getResourceRecord('example.test', '192.0.2.3', 'A', {
         queryDirectlyUDP: async (domain, serverIp, cache, qType, queryOptions) => {
