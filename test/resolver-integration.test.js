@@ -7,10 +7,13 @@ import test from 'node:test';
 import dnsPacket from 'dns-packet';
 import {
     isPublicDnsServerAddress, queryDirectlyUDP,
-    resolveHostnameIPv4Self, resolveServerIPs, ROOT_SERVER_BOOTSTRAP_IP
+    resolveHostnameIPv4Self, resolveServerIPs, ROOT_SERVER_BOOTSTRAP_IP, ROOT_SERVER_IPS, setDefaultRootServers
 } from 'dns-self-resolver';
 
 import { getARecord, getResourceRecord, getZoneApex } from '../dnssec-validator.js';
+
+// モックが a.root-servers.net から順に試す前提のため、ルートサーバーの無作為選択を固定する
+setDefaultRootServers(ROOT_SERVER_IPS);
 
 const LOCALHOST = '127.0.0.1';
 const TEST_TIMEOUT_MS = 5000;
