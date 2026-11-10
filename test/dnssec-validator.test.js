@@ -2451,6 +2451,24 @@ test('問い合わせ名の上位に DNAME がある場合は、DNAME を持つ�
     assert.equal(result.hasCnameOrDname, false);
 });
 
+test('書き換え後の名前が長すぎて YXDOMAIN が返る場合も、DNAME を持つゾーンを検証対象にする', async () => {
+    const result = await getZoneApex('www.old.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (name) => name === 'www.old.example.test'
+            ? {
+                rcode: 'YXDOMAIN', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                answers: [{ name: 'old.example.test', type: 'DNAME', data: 'new.example.net' }]
+            }
+            : {
+                rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER, answers: [],
+                authorities: [{ name: 'example.test', type: 'SOA', data: {} }]
+            }
+    });
+
+    assert.equal(result.zoneApex, 'example.test');
+    assert.deepEqual(result.dname, { owner: 'old.example.test', target: 'new.example.net' });
+});
+
 test('問い合わせ名の上位ではない DNAME や単独の CNAME では、従来どおり探索を打ち切る', async () => {
     for (const answers of [
         [{ name: 'other.example.test', type: 'DNAME', data: 'new.example.net' }],

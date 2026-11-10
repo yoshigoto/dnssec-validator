@@ -469,16 +469,19 @@ async function getZoneApex(domain, options = {}) {
             return false;
         };
         if (isAuthoritative) {
+            // 問い合わせ名の上位にある DNAME (RFC 6672) は、その DNAME を持つゾーンで署名を検証できる。
+            // 応答には合成 CNAME も含まれるため、CNAME より先に判定する。書き換え後の名前が長すぎる場合、
+            // 権威サーバーは合成 CNAME の代わりに YXDOMAIN とともに DNAME を返す
+            if (res.rcode === 'NOERROR' || res.rcode === 'YXDOMAIN') {
+                const coveringDname = answers.find(r => r.type === 'DNAME' &&
+                    isProperAncestorZone(r.name, domain) && isSameOrAncestorZone(lastDelegationZone, r.name));
+                if (coveringDname) {
+                    dname = { owner: normalizeResolverDnsName(coveringDname.name), target: normalizeResolverDnsName(coveringDname.data) };
+                    break;
+                }
+            }
             if (res.rcode === 'NOERROR') {
                 if (answers.length > 0) {
-                    // 問い合わせ名の上位にある DNAME (RFC 6672) は、その DNAME を持つゾーンで署名を検証できる。
-                    // 応答には合成 CNAME も含まれるため、CNAME より先に判定する
-                    const coveringDname = answers.find(r => r.type === 'DNAME' &&
-                        isProperAncestorZone(r.name, domain) && isSameOrAncestorZone(lastDelegationZone, r.name));
-                    if (coveringDname) {
-                        dname = { owner: normalizeResolverDnsName(coveringDname.name), target: normalizeResolverDnsName(coveringDname.data) };
-                        break;
-                    }
                     const cnameRecord = answers.find(r => r.type === 'CNAME');
                     if (cnameRecord) {
                         hasCnameOrDname = true;
