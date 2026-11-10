@@ -433,3 +433,34 @@ test('API由来の文字列はHTMLにせず、制御文字と表示長を制限�
     assert.equal(ui.window.injected, undefined);
     assert.equal(ui.element('parentZoneTitle').querySelector('.identifier').textContent, payload);
 });
+
+for (const language of ['ja', 'en']) {
+    test(`DNAME 配下の名前の検証結果を表示する (${language})`, async t => {
+        const result = makeResult('secure');
+        result.statusLabel = 'Secure（DNAMEによる書き換えを検証）';
+        result.logs = ['書き換え先の名前 [www.new.example.net] は別のゾーンに属するため、その名前で改めて検証してください。'];
+        Object.assign(result.diagram.child.aRecordValidation, {
+            signedRecordType: 'DNAME',
+            dname: {
+                owner: 'old.example.test', target: 'new.example.net', synthesizedName: 'www.new.example.net',
+                cnameMatches: true, synthesisVerified: true, diagnostics: []
+            }
+        });
+        const ui = createUi(t, { search: language === 'en' ? '?lang=en' : '', respond: () => jsonResponse(result) });
+        await ui.submit();
+
+        const text = ui.element('childARecordValidation').textContent;
+        assert.match(text, /DNAME: old\.example\.test -> new\.example\.net/);
+        assert.match(text, /ZSK -> DNAME RRset: RRSIG DNAME/);
+        if (language === 'en') {
+            assert.equal(ui.element('statusBox').innerText, 'Secure (DNAME redirection validated)');
+            assert.match(text, /Rewritten name: www\.new\.example\.net/);
+            assert.match(text, /CNAME in the response: matches the rewritten name ✓/);
+        } else {
+            assert.equal(ui.element('statusBox').innerText, result.statusLabel);
+            assert.match(text, /書き換え後の名前: www\.new\.example\.net/);
+            assert.match(text, /応答のCNAME: 合成結果と一致 ✓/);
+        }
+        assert.equal(ui.element('validation-error-details').style.display, 'block');
+    });
+}
