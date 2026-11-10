@@ -23,6 +23,8 @@ import {
     verifyDnskeyWithDs,
     verifyRecordRrsig,
     isZoneSigningKey,
+    applyDnameSubstitution,
+    analyzeDnameSynthesis,
     calculateKeyTag,
     buildDnskeyFullRdata,
     encodeDomainNameCanonical,
@@ -141,7 +143,7 @@ function encodeTestRdata(type, data) {
         data.split(':').forEach((part, index) => rdata.writeUInt16BE(parseInt(part, 16), index * 2));
         return rdata;
     }
-    if (type === 'CNAME' || type === 'NS') return encodeTestDnsName(data);
+    if (type === 'CNAME' || type === 'NS' || type === 'DNAME') return encodeTestDnsName(data);
     if (type === 'MX') {
         const preference = Buffer.alloc(2);
         preference.writeUInt16BE(data.preference);
@@ -177,7 +179,7 @@ function encodeTestRdata(type, data) {
 }
 
 function makeSignedRrsig(owner, signerName, type, records, signingKey, overrides = {}) {
-    const typeCode = { A: 1, NS: 2, CNAME: 5, MX: 15, TXT: 16, AAAA: 28, SRV: 33, DS: 43, NSEC: 47, DNSKEY: 48, NSEC3: 50, CAA: 257 }[type];
+    const typeCode = { A: 1, NS: 2, CNAME: 5, MX: 15, TXT: 16, AAAA: 28, SRV: 33, DNAME: 39, DS: 43, NSEC: 47, DNSKEY: 48, NSEC3: 50, CAA: 257 }[type];
     const fullKeyRdata = buildDnskeyFullRdata(signingKey.data);
     const now = Math.floor(Date.now() / 1000);
     const data = {
@@ -2393,4 +2395,201 @@ test('制限時間を超えて中断された検証は以降のDNS問い合わ�
     const result = await validationContext.run({ signal: controller.signal }, () =>
         queryPublicNameserverUDP('example.test', '198.41.0.4', new Map(), 'SOA'));
     assert.equal(result.error, 'ABORTED');
+});
+
+test('DNAME による名前の書き換えと合成 CNAME の突き合わせを判定する', () => {
+    assert.equal(applyDnameSubstitution('www.old.example.test', 'old.example.test', 'new.example.net'), 'www.new.example.net');
+    assert.equal(applyDnameSubstitution('A.B.Old.Example.Test.', 'old.example.test', 'New.Example.Net.'), 'a.b.new.example.net');
+    assert.equal(applyDnameSubstitution('www.old.example.test', 'old.example.test', '.'), 'www');
+    // DNAME は所有者名そのものや、配下でない名前には適用されない
+    assert.equal(applyDnameSubstitution('old.example.test', 'old.example.test', 'new.example.net'), null);
+    assert.equal(applyDnameSubstitution('wwwold.example.test', 'old.example.test', 'new.example.net'), null);
+
+    const dname = [{ name: 'old.example.test', type: 'DNAME', data: 'New.Example.Net' }];
+    const analyze = (cnames, records = dname, name = 'www.old.example.test') =>
+        analyzeDnameSynthesis(name, 'old.example.test', records, cnames.map(data => ({ name, type: 'CNAME', data })));
+
+    const matched = analyze(['WWW.new.example.net.']);
+    assert.deepEqual(
+        [matched.target, matched.synthesizedName, matched.cnameMatches, matched.synthesisVerified],
+        ['new.example.net', 'www.new.example.net', true, true]
+    );
+    assert.deepEqual([analyze([]).cnameMatches, analyze([]).synthesisVerified], [null, true]);
+    assert.deepEqual([analyze(['www.evil.example']).cnameMatches, analyze(['www.evil.example']).synthesisVerified], [false, false]);
+    assert.equal(analyze([], [...dname, ...dname]).synthesisVerified, false);
+    const tooLong = analyze([], [{ ...dname[0], data: `${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.example` }],
+        `${'d'.repeat(60)}.${'e'.repeat(10)}.old.example.test`);
+    assert.equal(tooLong.synthesisVerified, false);
+    assert.match(tooLong.diagnostics[0], /YXDOMAIN/);
+});
+
+test('問い合わせ名の上位に DNAME がある場合は、DNAME を持つゾーンを検証対象にする', async () => {
+    const queries = [];
+    const result = await getZoneApex('www.old.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (name, serverIp, cache, type) => {
+            queries.push(`${type} ${name}`);
+            if (name === 'www.old.example.test') {
+                return {
+                    rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                    answers: [
+                        { name: 'Old.Example.Test', type: 'DNAME', data: 'new.example.net' },
+                        { name: 'www.old.example.test', type: 'CNAME', data: 'www.new.example.net' }
+                    ]
+                };
+            }
+            return {
+                rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER, answers: [],
+                authorities: [{ name: 'example.test', type: 'SOA', data: {} }]
+            };
+        }
+    });
+
+    assert.deepEqual(queries, ['SOA www.old.example.test', 'SOA old.example.test']);
+    assert.equal(result.zoneApex, 'example.test');
+    assert.deepEqual(result.dname, { owner: 'old.example.test', target: 'new.example.net' });
+    assert.equal(result.hasCnameOrDname, false);
+});
+
+test('書き換え後の名前が長すぎて YXDOMAIN が返る場合も、DNAME を持つゾーンを検証対象にする', async () => {
+    const result = await getZoneApex('www.old.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (name) => name === 'www.old.example.test'
+            ? {
+                rcode: 'YXDOMAIN', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+                answers: [{ name: 'old.example.test', type: 'DNAME', data: 'new.example.net' }]
+            }
+            : {
+                rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER, answers: [],
+                authorities: [{ name: 'example.test', type: 'SOA', data: {} }]
+            }
+    });
+
+    assert.equal(result.zoneApex, 'example.test');
+    assert.deepEqual(result.dname, { owner: 'old.example.test', target: 'new.example.net' });
+});
+
+test('問い合わせ名の上位ではない DNAME や単独の CNAME では、従来どおり探索を打ち切る', async () => {
+    for (const answers of [
+        [{ name: 'other.example.test', type: 'DNAME', data: 'new.example.net' }],
+        [{ name: 'www.old.example.test', type: 'CNAME', data: 'www.new.example.net' }]
+    ]) {
+        const result = await getZoneApex('www.old.example.test', {
+            initialNameserver: '192.0.2.1',
+            queryDirectlyUDP: async () => ({ rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER, answers })
+        });
+        assert.equal(result.zoneApex, '');
+        assert.equal(result.hasCnameOrDname, true);
+        assert.equal(result.dname, undefined);
+    }
+});
+
+test('DNAME 配下の名前は、署名済み DNAME と書き換え結果を API 経由で検証する', async () => {
+    const zone = 'child.example.test';
+    const parentZone = 'example.test';
+    const owner = 'old.child.example.test';
+    const domain = 'www.old.child.example.test';
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const parentKey = makeSigningKey(15, 257);
+    const childKsk = makeSigningKey(15, 257);
+    const childZsk = makeSigningKey(15, 256);
+    const parentDnskey = { name: parentZone, type: 'DNSKEY', data: parentKey.data };
+    const childDnskeys = [
+        { name: zone, type: 'DNSKEY', data: childKsk.data },
+        { name: zone, type: 'DNSKEY', data: childZsk.data }
+    ];
+    const dsRecord = { name: zone, type: 'DS', data: makeDsForDnskey(zone, childKsk.data) };
+    const dsSignature = makeSignedRrsig(zone, parentZone, 'DS', [dsRecord], parentKey);
+    const dnskeySignature = makeSignedRrsig(zone, zone, 'DNSKEY', childDnskeys, childKsk);
+    // 署名は小文字のターゲットで作り、応答は大文字を含むターゲットで返す (正規形での検証を確認する)
+    const dnameSignature = makeSignedRrsig(owner, zone, 'DNAME', [{ data: 'new.example.net' }], childZsk);
+    const dnameRecord = { name: owner, type: 'DNAME', data: 'New.Example.NET' };
+    const response = (resourceRecords, rrsigRecords = []) => ({
+        rcode: 'NOERROR', resourceRecords, rrsigRecords, denialRecords: [], denialRrsigRecords: []
+    });
+    let cnameTarget = 'www.new.example.net';
+    let corruptSignature = false;
+    const queried = [];
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    app.locals.dnssecValidationDependencies = {
+        getZoneApex: async () => ({
+            zoneApex: zone,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false,
+            dname: { owner, target: 'new.example.net' }
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') return response([dsRecord], [dsSignature]);
+            if (recordType === 'DNSKEY' && serverIp === parentIp) return response([parentDnskey]);
+            if (recordType === 'DNSKEY') return response(childDnskeys, [dnskeySignature]);
+            queried.push(`${recordType} ${queryName}`);
+            if (recordType === 'DNAME' && queryName === owner) {
+                const signature = { ...dnameSignature, data: { ...dnameSignature.data, signature: Buffer.from(dnameSignature.data.signature) } };
+                if (corruptSignature) signature.data.signature[0] ^= 1;
+                return response([dnameRecord], [signature]);
+            }
+            if (recordType === 'CNAME' && queryName === domain) {
+                return response(cnameTarget ? [{ name: domain, type: 'CNAME', data: cnameTarget }] : []);
+            }
+            throw new Error(`Unexpected query ${recordType} for ${queryName}`);
+        },
+        compareAuthorityRecordSets: async (zoneName, nameservers, recordType) => ({
+            recordType, complete: true, consistent: true, hasDifferences: false, servers: []
+        }),
+        diagnoseDsProposals: async () => ({ parentDs: [], cds: null, cdnskey: null, notes: [] })
+    };
+
+    const server = app.listen(0);
+    const validate = async () => JSON.parse((await request(server, {
+        method: 'POST',
+        path: '/api/validate',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, recordType: 'A' })
+    })).body);
+    try {
+        const secure = await validate();
+        const validation = secure.diagram.child.aRecordValidation;
+        assert.equal(secure.status, 'secure');
+        assert.equal(secure.statusLabel, 'Secure（DNAMEによる書き換えを検証）');
+        assert.equal(secure.success, true);
+        assert.equal(secure.diagram.child.name, zone);
+        assert.equal(validation.recordType, 'A');
+        assert.equal(validation.signedRecordType, 'DNAME');
+        assert.equal(validation.signatures[0].trustChainVerified, true);
+        assert.deepEqual(
+            [validation.dname.owner, validation.dname.target, validation.dname.synthesizedName, validation.dname.cnameMatches],
+            [owner, 'new.example.net', 'www.new.example.net', true]
+        );
+        assert.ok(secure.logs.some(line => line.includes('www.new.example.net') && line.includes('改めて検証')));
+        // 署名のない合成 CNAME ではなく DNAME RRset を検証対象にし、入力名の A は問い合わせない
+        assert.deepEqual(queried, [`DNAME ${owner}`, `CNAME ${domain}`]);
+
+        cnameTarget = '';
+        const withoutCname = await validate();
+        assert.equal(withoutCname.status, 'secure');
+        assert.equal(withoutCname.diagram.child.aRecordValidation.dname.cnameMatches, null);
+
+        cnameTarget = 'www.evil.example';
+        const mismatched = await validate();
+        assert.equal(mismatched.status, 'bogus');
+        assert.equal(mismatched.statusLabel, 'Bogus（DNAMEと合成CNAMEの不一致）');
+        assert.equal(mismatched.success, false);
+
+        cnameTarget = 'www.new.example.net';
+        corruptSignature = true;
+        const tampered = await validate();
+        assert.equal(tampered.status, 'bogus');
+        assert.equal(tampered.success, false);
+        assert.equal(tampered.diagram.child.aRecordValidation.signatures[0].trustChainVerified, false);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
+        await new Promise(resolve => server.close(resolve));
+    }
 });

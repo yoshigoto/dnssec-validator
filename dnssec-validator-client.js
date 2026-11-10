@@ -18,6 +18,11 @@ function translate(value) {
     text = text.replace(/([A-Z]+)レコードへのRRSIGの探索: 失敗 ✕/g, 'No RRSIG found for $1 record: Failed ✕');
     text = text.replace(/([A-Z]+)レコードの探索: 失敗 ✕/g, 'No $1 record found: Failed ✕');
     const replacements = [
+        ['書き換え後の名前: ', 'Rewritten name: '],
+        ['算出できません ✕', 'cannot be determined ✕'],
+        ['応答のCNAME: 合成結果と一致 ✓', 'CNAME in the response: matches the rewritten name ✓'],
+        ['応答のCNAME: 合成結果と不一致 ✕', 'CNAME in the response: does not match the rewritten name ✕'],
+        ['応答のCNAME: 応答に含まれていません', 'CNAME in the response: not included'],
         ['検証データを取得できませんでした', 'Could not retrieve validation data'],
         ['検証できませんでした', 'Validation failed'],
         ['取得できませんでした', 'Could not retrieve'],
@@ -196,7 +201,15 @@ const aRecordValidationText = validation => {
         const nsec3Lines = observedNsec3.map(record => '応答NSEC3: ' + record.ownerHash + ' -> ' + record.nextHash + ' / iteration ' + record.iterations + ' / salt ' + record.salt);
         return [`${recordType}レコードの探索: 失敗 ✕`, 'NSEC/NSEC3による不在証明: 失敗 ✕'].concat(diagnostics, nsecLines, nsec3Lines);
     }
-    if (validation.signatures.length === 0) return [`${recordType}レコードへのRRSIGの探索: 失敗 ✕`];
+    // DNAME 配下の名前では、署名済みの DNAME RRset と書き換え結果を表示する
+    const signedType = validation.signedRecordType || recordType;
+    const dname = validation.dname;
+    const dnameLines = dname ? [
+        'DNAME: ' + dname.owner + ' -> ' + (dname.target || '.'),
+        '書き換え後の名前: ' + (dname.synthesizedName || '算出できません ✕'),
+        '応答のCNAME: ' + (dname.cnameMatches === true ? '合成結果と一致 ✓' : dname.cnameMatches === false ? '合成結果と不一致 ✕' : '応答に含まれていません')
+    ] : [];
+    if (validation.signatures.length === 0) return dnameLines.concat([`${signedType}レコードへのRRSIGの探索: 失敗 ✕`]);
     const trustChain = validation.trustChain || {};
     const kskKeyTags = trustChain.dsMatchedKskKeyTags || [];
     const dnskeySignatures = trustChain.dnskeyRrsetSignatures || [];
@@ -204,13 +217,13 @@ const aRecordValidationText = validation => {
         'DS -> KSK: ' + (kskKeyTags.length ? 'Key Tag' + kskKeyTags.join(', ') + 'が一致 ✓' : '一致するKSKなし ✕'),
         'KSK -> DNSKEY RRset: ' + (dnskeySignatures.length ? dnskeySignatures.map(signature => 'Key Tag' + signature.kskKeyTag).join(', ') + 'による署名検証: 成功 ✓' : 'DS一致KSKによる署名検証: 失敗 ✕')
     ];
-    return lines.concat(validation.signatures.map(signature => {
+    return dnameLines.concat(lines, validation.signatures.map(signature => {
         const result = signature.verified === false
             ? '署名検証: 失敗 ✕'
             : signature.trustChainVerified
                 ? '信頼の連鎖: 成功 ✓'
                 : '信頼の連鎖: 失敗 ✕';
-        const line = 'ZSK -> ' + recordType + ' RRset: RRSIG ' + recordType + ' / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
+        const line = 'ZSK -> ' + signedType + ' RRset: RRSIG ' + signedType + ' / Key Tag ' + signature.keyTag + ' / ' + algorithmText(signature.algorithm) + ' -> ' + result;
         const lineWithExpiration = line + rrsigExpirationText(signature.expiration);
         return signature.verified === false && signature.reason ? [lineWithExpiration, '失敗理由: ' + signature.reason] : [lineWithExpiration];
     }).flat());
@@ -407,7 +420,7 @@ async function validate(event) {
             const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
             statusBox.className = 'result-status-box ' + (statusClasses[data.status] || 'status-indeterminate');
             statusBox.innerText = isEnglish
-                ? ({ secure: 'Secure (validation succeeded)', insecure: 'Insecure (unsigned delegation)', bogus: 'Bogus (DNSSEC validation failed)', indeterminate: data.timedOut ? 'Indeterminate (timeout)' : 'Indeterminate (insufficient validation data)' }[data.status] || 'Indeterminate')
+                ? ({ secure: data.diagram && data.diagram.child && data.diagram.child.aRecordValidation && data.diagram.child.aRecordValidation.dname ? 'Secure (DNAME redirection validated)' : 'Secure (validation succeeded)', insecure: 'Insecure (unsigned delegation)', bogus: 'Bogus (DNSSEC validation failed)', indeterminate: data.timedOut ? 'Indeterminate (timeout)' : 'Indeterminate (insufficient validation data)' }[data.status] || 'Indeterminate')
                 : data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
             const detailLines = [...(data.logs || [])];
             if (detailLines.length > 0) {
