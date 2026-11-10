@@ -730,6 +730,17 @@ test('初期ネームサーバー未指定時はルートブートストラッ�
     assert.equal(result.zoneApex, 'example.test');
 });
 
+test('ネームサーバー名はIPv4を優先し、AレコードがなければIPv6で解決する', async () => {
+    const resolveHostnameIPv6Self = async () => '2001:db8::53';
+    assert.equal(await getARecord('ns.dual.test', {
+        resolveHostnameIPv4Self: async () => '192.0.2.53', resolveHostnameIPv6Self
+    }), '192.0.2.53');
+    assert.equal(await getARecord('ns.v6only.test', {
+        resolveHostnameIPv4Self: async () => null, resolveHostnameIPv6Self
+    }), '2001:db8::53');
+    await assert.rejects(getARecord('ns.none.test', { resolveHostnameIPv4Self: async () => null }), /A\/AAAAレコード取得失敗/);
+});
+
 test('ルート referral の TLD glue を使って次の権威サーバーへ進む', async () => {
     const queriedServerIps = [];
     const result = await getZoneApex('com', {
@@ -775,11 +786,16 @@ for (const scenario of [
         ns: ['ns1.external.net', 'ns2.external.net'], addresses: [
             { name: 'ns2.external.net', type: 'A', data: '192.0.2.2' }
         ], expected: '192.0.2.53', resolved: 'ns1.external.net' },
-    { label: 'AAAAだけなら最初のNS名をIPv4自己解決', initial: ROOT_SERVER_BOOTSTRAP_IP,
+    { label: 'AAAAだけならin-domain AAAAをNS順で使う', initial: ROOT_SERVER_BOOTSTRAP_IP,
         ns: ['NS1.COM.', 'ns2.com'], addresses: [
             { name: 'ns2.com', type: 'AAAA', data: '2001:db8::2' },
             { name: 'ns1.com', type: 'AAAA', data: '2001:db8::1' }
-        ], expected: '192.0.2.53', resolved: 'NS1.COM.' }
+        ], expected: '2001:db8::1' },
+    { label: 'AがあればAAAAより優先', initial: ROOT_SERVER_BOOTSTRAP_IP,
+        ns: ['ns1.com', 'ns2.com'], addresses: [
+            { name: 'ns1.com', type: 'AAAA', data: '2001:db8::1' },
+            { name: 'ns2.com', type: 'A', data: '192.0.2.2' }
+        ], expected: '192.0.2.2' }
 ]) {
     test(`共通referral候補でもDNSSEC探索は1候補を選択: ${scenario.label}`, async () => {
         const queried = [];

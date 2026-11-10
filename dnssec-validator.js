@@ -15,9 +15,11 @@ import {
     isInBailiwickGlue,
     isPublicDnsServerAddress as isPublicUnicastAddress,
     normalizeDnsName as normalizeResolverDnsName,
+    createDnsResponseCache,
     createQueryBudget,
     queryDirectlyUDP,
-    resolveHostnameIPv4Self
+    resolveHostnameIPv4Self,
+    resolveHostnameIPv6Self
 } from 'dns-self-resolver';
 import express from 'express';
 
@@ -44,7 +46,6 @@ app.use((req, res, next) => {
 
 // --- 定数定義 ---
 const ROOT_NAMESERVER = ROOT_SERVER_BOOTSTRAP_IP;
-const dnssecResponseCache = new Map();
 const MAX_DOMAIN_LENGTH = 253;
 const RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
 const rateLimitMap = new Map(); // クライアントキー (IPv4 アドレス / IPv6 /64): { count, resetTime }
@@ -55,6 +56,8 @@ const MAX_CONCURRENT_VALIDATIONS = 16; // タイムアウト応答後も続く�
 const MAX_CONCURRENT_VALIDATIONS_PER_CLIENT = 2; // 1クライアントで全体の実行枠を占有させない
 const MAINTENANCE_INTERVAL_MS = 60000;
 const MAX_DNS_RESPONSE_CACHE_ENTRIES = 20000;
+// エントリ数の上限は dns-self-resolver が保存時に適用する
+const dnssecResponseCache = createDnsResponseCache(MAX_DNS_RESPONSE_CACHE_ENTRIES);
 const MAX_RATE_LIMIT_ENTRIES = 10000;
 // --- 攻撃者が制御する権威サーバー応答に対する計算量の上限 (KeyTrap / NSEC3 反復回数による CPU 枯渇対策) ---
 const MAX_NSEC3_ITERATIONS = 150; // RFC 9276: これを超える反復回数の NSEC3 は検証に使わない
@@ -84,25 +87,24 @@ function getIPv6Hextets(address) {
 // 検証リクエストごとの AbortSignal と、再送も含めた DNS メッセージ送信予算。
 const validationContext = new AsyncLocalStorage();
 
-// 攻撃者が glue / NS 名の A レコードで指定した内部アドレスへ問い合わせないよう、送信直前に宛先を検査する
-function queryPublicNameserverUDP(domain, serverIp, dnsResponseCache, qType, queryOptions) {
-    if (!isPublicUnicastAddress(serverIp)) {
-        return Promise.resolve({
-            error: 'BLOCKED_ADDRESS', name: domain, serverIp, qType, transport: 'udp', retryable: false,
-            detail: `問い合わせ先 ${serverIp} は内部・特殊用途のアドレスのため拒否しました`
-        });
-    }
-    const baseOptions = typeof queryOptions === 'boolean' ? { useEdns: queryOptions } : { ...(queryOptions || {}) };
-    const options = { ...baseOptions, isAllowedServerIP: isPublicUnicastAddress };
+// 攻撃者が glue / NS 名の A / AAAA レコードで指定した内部アドレスへ問い合わせないよう、公開アドレス限定のポリシーと
+// 検証ごとの送信予算・中断を付けて問い合わせる。宛先の拒否・中断・オプションの正規化は dns-self-resolver が行い、
+// ここでは利用者向けの文言だけを差し替える
+const QUERY_ERROR_DETAILS = {
+    BLOCKED_ADDRESS: serverIp => `問い合わせ先 ${serverIp} は内部・特殊用途のアドレスのため拒否しました`,
+    ABORTED: () => '検証処理の制限時間を超えたため問い合わせを中止しました'
+};
+
+async function queryPublicNameserverUDP(domain, serverIp, dnsResponseCache, qType, queryOptions) {
     const { signal, queryBudget } = validationContext.getStore() || {};
-    if (queryBudget) options.queryBudget = queryBudget;
-    if (signal) {
-        if (signal.aborted) {
-            return Promise.resolve({ error: 'ABORTED', detail: '検証処理の制限時間を超えたため問い合わせを中止しました' });
-        }
-        return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, { ...options, signal });
-    }
-    return queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, options);
+    const result = await queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, {
+        ...queryOptions,
+        isAllowedServerIP: isPublicUnicastAddress,
+        ...(queryBudget ? { queryBudget } : {}),
+        ...(signal ? { signal } : {})
+    });
+    const detail = QUERY_ERROR_DETAILS[result?.error];
+    return detail ? { ...result, detail: detail(serverIp) } : result;
 }
 
 function isSameOrAncestorZone(zone, name) {
@@ -144,10 +146,6 @@ function pruneExpiredEntries(now = Date.now()) {
     }
     for (const [key, entry] of dnssecResponseCache) {
         if (!entry || !(entry.expiresAt > now)) dnssecResponseCache.delete(key);
-    }
-    for (const key of dnssecResponseCache.keys()) {
-        if (dnssecResponseCache.size <= MAX_DNS_RESPONSE_CACHE_ENTRIES) break;
-        dnssecResponseCache.delete(key);
     }
 }
 
@@ -336,6 +334,7 @@ async function compareAuthorityRecordSets(zoneApex, nameservers, recordType, opt
             const serverIp = await getARecord(nameserver, {
                 queryDirectlyUDP: queryUdp,
                 resolveHostnameIPv4Self: options.resolveHostnameIPv4Self,
+                resolveHostnameIPv6Self: options.resolveHostnameIPv6Self,
                 knownAddresses: options.knownAddresses,
                 dnsResponseCache
             });
@@ -372,26 +371,33 @@ async function compareAuthorityRecordSets(zoneApex, nameservers, recordType, opt
     };
 }
 
-// --- ヘルパー関数: Aレコードを取得する ---
-async function getARecord(domain, options = {}) {
-    if (net.isIP(domain)) {
-        return domain;
-    }
+// --- ヘルパー関数: ネームサーバー名の IP アドレスを自己解決する ---
+// IPv4 を優先し、A レコードが無い場合は IPv6 を使う。見つからなければ null を返す。
+// resolveHostnameIPv4Self だけが差し替えられている場合は、その関数だけで解決する (IPv6 用の既定関数は使わない)
+async function resolveNameserverIp(nameserver, options = {}) {
+    if (net.isIP(nameserver)) return nameserver;
 
-    const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
     const queryUdp = options.queryDirectlyUDP || queryPublicNameserverUDP;
-    const ipAddress = await resolveIPv4(domain, {
+    const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
+    const resolveIPv6 = options.resolveHostnameIPv6Self ||
+        (options.resolveHostnameIPv4Self ? null : resolveHostnameIPv6Self);
+    const { signal, queryBudget } = validationContext.getStore() || {};
+    const dependencies = {
         queryDirectlyUDP: queryUdp,
-        ...(queryUdp === queryPublicNameserverUDP ? {
-            isAllowedServerIP: isPublicUnicastAddress,
-            signal: validationContext.getStore()?.signal,
-            queryBudget: validationContext.getStore()?.queryBudget
-        } : {}),
+        ...(queryUdp === queryPublicNameserverUDP ? { isAllowedServerIP: isPublicUnicastAddress, signal, queryBudget } : {}),
         knownAddresses: options.knownAddresses,
         dnsResponseCache: options.dnsResponseCache
-    });
+    };
+    const ipv4 = await resolveIPv4(nameserver, dependencies);
+    if (ipv4 || !resolveIPv6 || signal?.aborted) return ipv4 || null;
+    return await resolveIPv6(nameserver, dependencies) || null;
+}
+
+// 名前は互換性のため維持している (IPv4 が無い場合は IPv6 アドレスを返す)
+async function getARecord(domain, options = {}) {
+    const ipAddress = await resolveNameserverIp(domain, options);
     if (!ipAddress) {
-        throw new Error(`Aレコード取得失敗[${domain}]: ルートからの自己解決でIP アドレスが見つかりません`);
+        throw new Error(`A/AAAAレコード取得失敗[${domain}]: ルートからの自己解決でIP アドレスが見つかりません`);
     }
     return ipAddress;
 }
@@ -399,7 +405,12 @@ async function getARecord(domain, options = {}) {
 // --- ヘルパー関数: ゾーン頂点をルートから辿って取得する ---
 async function getZoneApex(domain, options = {}) {
     const queryUdp = options.queryDirectlyUDP || queryPublicNameserverUDP;
-    const resolveIPv4 = options.resolveHostnameIPv4Self || resolveHostnameIPv4Self;
+    const nameserverOptions = {
+        queryDirectlyUDP: queryUdp,
+        resolveHostnameIPv4Self: options.resolveHostnameIPv4Self,
+        resolveHostnameIPv6Self: options.resolveHostnameIPv6Self,
+        knownAddresses: options.knownAddresses
+    };
     const dnsResponseCache = options.dnsResponseCache || new Map();
     let currentNs = options.initialNameserver || ROOT_NAMESERVER;
     let parentNs = '';
@@ -415,16 +426,7 @@ async function getZoneApex(domain, options = {}) {
         const isRootNameserver = currentNs === ROOT_NAMESERVER;
         let currentServerIp;
         try {
-            currentServerIp = net.isIP(currentNs) ? currentNs : await resolveIPv4(currentNs, {
-                queryDirectlyUDP: queryUdp,
-                ...(queryUdp === queryPublicNameserverUDP ? {
-                    isAllowedServerIP: isPublicUnicastAddress,
-                    signal: validationContext.getStore()?.signal,
-                    queryBudget: validationContext.getStore()?.queryBudget
-                } : {}),
-                knownAddresses: options.knownAddresses,
-                dnsResponseCache
-            });
+            currentServerIp = await resolveNameserverIp(currentNs, { ...nameserverOptions, dnsResponseCache });
         } catch (error) {
             if (!lastDelegationZone) throw error;
             discoveryError = `委任先 [${currentNs}] の IP アドレス取得失敗: ${error.message}`;
@@ -521,28 +523,33 @@ async function getZoneApex(domain, options = {}) {
                 parentNameservers = childNameservers;
                 childNameservers = [...new Set(nsRecords.map(record => record.data))].slice(0, MAX_NAMESERVERS_PER_ZONE);
                 lastDelegationZone = delegationZone;
-                // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する
+                // 委任先ゾーン内のグルーレコードを優先選択し、ホスト名解決による getARecord の循環参照を回避する。
+                // IPv4 (A) の glue を優先し、無い場合だけ IPv6 (AAAA) の glue を使う
                 let chosenNsRecord = null;
                 let chosenNsIp = null;
                 const referral = getReferralNameserverCandidates(nsRecords, additionals, nsRecords[0].name, {
                     gluePolicy: 'strict',
                     serverZone: isRootNameserver ? '.' : nsRecords[0].name,
-                    addressTypes: ['A']
+                    addressTypes: ['A', 'AAAA']
                 });
-                for (const { nsRecord, nsName, addressRecords } of referral.candidates) {
-                    const glueA = addressRecords.find(record => isInBailiwickGlue(record, [nsName], nsRecord.name));
-                    if (glueA) {
-                        chosenNsRecord = nsRecord;
-                        chosenNsIp = glueA.data;
-                        break;
+                for (const addressType of ['A', 'AAAA']) {
+                    for (const { nsRecord, nsName, addressRecords } of referral.candidates) {
+                        const glue = addressRecords.find(record =>
+                            record.type === addressType && isInBailiwickGlue(record, [nsName], nsRecord.name));
+                        if (glue) {
+                            chosenNsRecord = nsRecord;
+                            chosenNsIp = glue.data;
+                            break;
+                        }
                     }
-                }
-                if (!chosenNsRecord) {
-                    const referralA = referral.addressRecords[0];
-                    if (referralA) {
-                        chosenNsRecord = nsRecords.find(record => normalizeResolverDnsName(record.data) === normalizeResolverDnsName(referralA.name));
-                        chosenNsIp = referralA.data;
+                    if (!chosenNsRecord) {
+                        const referralAddress = referral.addressRecords.find(record => record.type === addressType);
+                        if (referralAddress) {
+                            chosenNsRecord = nsRecords.find(record => normalizeResolverDnsName(record.data) === normalizeResolverDnsName(referralAddress.name));
+                            chosenNsIp = referralAddress.data;
+                        }
                     }
+                    if (chosenNsRecord) break;
                 }
                 if (!chosenNsRecord) {
                     chosenNsRecord = nsRecords[0];
@@ -564,12 +571,7 @@ async function getZoneApex(domain, options = {}) {
         childNameservers = [];
         for (const nameserver of parentNameservers) {
             try {
-                const serverIp = await getARecord(nameserver, {
-                    queryDirectlyUDP: queryUdp,
-                    resolveHostnameIPv4Self: resolveIPv4,
-                    knownAddresses: options.knownAddresses,
-                    dnsResponseCache
-                });
+                const serverIp = await getARecord(nameserver, { ...nameserverOptions, dnsResponseCache });
                 const response = await queryUdp(zoneApex, serverIp, dnsResponseCache, 'NS', { useEdns: true, dnssecOk: true });
                 if (response.error) continue;
                 const nsRecords = [...(response.answers || []), ...(response.authorities || [])].filter(record =>
