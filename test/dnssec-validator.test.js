@@ -1963,6 +1963,30 @@ test('内部・特殊用途アドレスのネームサーバーには問い合�
     await assert.rejects(getResourceRecord('example.test', '127.0.0.1', 'DS'), /BLOCKED_ADDRESS/);
 });
 
+test('公開ネームサーバーへのUDP問い合わせは boolean の useEdns 指定を維持する', async t => {
+    const ednsByName = {};
+    t.mock.method(dgram, 'createSocket', () => {
+        const socket = new EventEmitter();
+        socket.bind = (_options, callback) => queueMicrotask(callback);
+        socket.close = () => {};
+        socket.send = (buffer, offset, length, port, address, callback) => {
+            callback(null);
+            const query = dnsPacket.decode(buffer);
+            ednsByName[query.questions[0].name.toLowerCase()] = query.additionals.some(record => record.type === 'OPT');
+            queueMicrotask(() => socket.emit('message', dnsPacket.encode({
+                type: 'response', id: query.id, questions: query.questions
+            }), { address, port }));
+        };
+        return socket;
+    });
+
+    await queryPublicNameserverUDP('edns-off.test', '8.8.8.8', new Map(), 'SOA', false);
+    await queryPublicNameserverUDP('edns-on.test', '8.8.8.8', new Map(), 'SOA', true);
+    await queryPublicNameserverUDP('edns-default.test', '8.8.8.8', new Map(), 'SOA');
+
+    assert.deepEqual(ednsByName, { 'edns-off.test': false, 'edns-on.test': true, 'edns-default.test': true });
+});
+
 test('公開ネームサーバーへのUDP問い合わせは共有ポリシーを適用してTCPへフォールバックする', async t => {
     let udpRequests = 0;
     let tcpConnections = 0;

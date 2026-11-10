@@ -88,7 +88,7 @@ function getIPv6Hextets(address) {
 const validationContext = new AsyncLocalStorage();
 
 // 攻撃者が glue / NS 名の A / AAAA レコードで指定した内部アドレスへ問い合わせないよう、公開アドレス限定のポリシーと
-// 検証ごとの送信予算・中断を付けて問い合わせる。宛先の拒否・中断・オプションの正規化は dns-self-resolver が行い、
+// 検証ごとの送信予算・中断を付けて問い合わせる。宛先の拒否・中断の判定は dns-self-resolver が行い、
 // ここでは利用者向けの文言だけを差し替える
 const QUERY_ERROR_DETAILS = {
     BLOCKED_ADDRESS: serverIp => `問い合わせ先 ${serverIp} は内部・特殊用途のアドレスのため拒否しました`,
@@ -98,7 +98,8 @@ const QUERY_ERROR_DETAILS = {
 async function queryPublicNameserverUDP(domain, serverIp, dnsResponseCache, qType, queryOptions) {
     const { signal, queryBudget } = validationContext.getStore() || {};
     const result = await queryDirectlyUDP(domain, serverIp, dnsResponseCache, qType, {
-        ...queryOptions,
+        // queryDirectlyUDP と同じく boolean (useEdns) も受け付ける。オプションを追加するため、ここでオブジェクトに直す
+        ...(typeof queryOptions === 'boolean' ? { useEdns: queryOptions } : queryOptions),
         isAllowedServerIP: isPublicUnicastAddress,
         ...(queryBudget ? { queryBudget } : {}),
         ...(signal ? { signal } : {})
