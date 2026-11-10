@@ -2469,10 +2469,10 @@ test('書き換え後の名前が長すぎて YXDOMAIN が返る場合も、DNAM
     assert.deepEqual(result.dname, { owner: 'old.example.test', target: 'new.example.net' });
 });
 
-test('問い合わせ名の上位ではない DNAME や単独の CNAME では、従来どおり探索を打ち切る', async () => {
+test('問い合わせ名の上位ではない DNAME や別の名前の CNAME では、従来どおり探索を打ち切る', async () => {
     for (const answers of [
         [{ name: 'other.example.test', type: 'DNAME', data: 'new.example.net' }],
-        [{ name: 'www.old.example.test', type: 'CNAME', data: 'www.new.example.net' }]
+        [{ name: 'other.example.test', type: 'CNAME', data: 'www.new.example.net' }]
     ]) {
         const result = await getZoneApex('www.old.example.test', {
             initialNameserver: '192.0.2.1',
@@ -2481,7 +2481,45 @@ test('問い合わせ名の上位ではない DNAME や単独の CNAME では、
         assert.equal(result.zoneApex, '');
         assert.equal(result.hasCnameOrDname, true);
         assert.equal(result.dname, undefined);
+        assert.equal(result.cname, undefined);
     }
+});
+
+test('問い合わせ名が CNAME の場合は、上位の名前から CNAME を持つゾーンを特定する', async () => {
+    const soa = name => ({
+        rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+        answers: [{ name, type: 'SOA', data: {} }]
+    });
+    const alias = (name, data) => ({
+        rcode: 'NOERROR', flags: dnsPacket.AUTHORITATIVE_ANSWER,
+        answers: [{ name, type: 'CNAME', data }]
+    });
+    const queries = [];
+    const result = await getZoneApex('WWW.Alias.Example.Test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (name) => {
+            queries.push(name);
+            // 1 つ上の名前も CNAME で、その上がゾーン頂点
+            if (name === 'WWW.Alias.Example.Test') return alias(name, 'Target.Example.Net');
+            if (name === 'alias.example.test') return alias(name, 'other.example.net');
+            return soa(name);
+        }
+    });
+
+    assert.deepEqual(queries, ['WWW.Alias.Example.Test', 'alias.example.test', 'example.test']);
+    assert.equal(result.zoneApex, 'example.test');
+    assert.deepEqual(result.cname, { owner: 'www.alias.example.test', target: 'target.example.net' });
+    assert.equal(result.hasCnameOrDname, false);
+
+    // 上位の名前のゾーンを特定できない場合は打ち切る
+    const unresolved = await getZoneApex('www.example.test', {
+        initialNameserver: '192.0.2.1',
+        queryDirectlyUDP: async (name) => name === 'www.example.test'
+            ? alias(name, 'target.example.net')
+            : { rcode: 'REFUSED', flags: 0, answers: [] }
+    });
+    assert.equal(unresolved.zoneApex, '');
+    assert.equal(unresolved.hasCnameOrDname, true);
 });
 
 test('DNAME 配下の名前は、署名済み DNAME と書き換え結果を API 経由で検証する', async () => {
@@ -2592,4 +2630,122 @@ test('DNAME 配下の名前は、署名済み DNAME と書き換え結果を API
         else app.locals.dnssecValidationDependencies = previousDependencies;
         await new Promise(resolve => server.close(resolve));
     }
+});
+
+test('CNAME の名前は、署名済み CNAME RRset を API 経由で検証する', async () => {
+    const zone = 'child.example.test';
+    const parentZone = 'example.test';
+    const domain = 'www.child.example.test';
+    const parentIp = '192.0.2.1';
+    const childIp = '192.0.2.2';
+    const parentKey = makeSigningKey(15, 257);
+    const childKsk = makeSigningKey(15, 257);
+    const childZsk = makeSigningKey(15, 256);
+    const parentDnskey = { name: parentZone, type: 'DNSKEY', data: parentKey.data };
+    const childDnskeys = [
+        { name: zone, type: 'DNSKEY', data: childKsk.data },
+        { name: zone, type: 'DNSKEY', data: childZsk.data }
+    ];
+    const dsRecord = { name: zone, type: 'DS', data: makeDsForDnskey(zone, childKsk.data) };
+    const dsSignature = makeSignedRrsig(zone, parentZone, 'DS', [dsRecord], parentKey);
+    const dnskeySignature = makeSignedRrsig(zone, zone, 'DNSKEY', childDnskeys, childKsk);
+    // 署名は小文字のターゲットで作り、応答は大文字を含むターゲットで返す (正規形での検証を確認する)
+    const cnameSignature = makeSignedRrsig(domain, zone, 'CNAME', [{ data: 'target.example.net' }], childZsk);
+    const cnameRecord = { name: domain, type: 'CNAME', data: 'Target.Example.NET' };
+    const response = (resourceRecords, rrsigRecords = []) => ({
+        rcode: 'NOERROR', resourceRecords, rrsigRecords, denialRecords: [], denialRrsigRecords: []
+    });
+    let cnameRecords = [cnameRecord];
+    let corruptSignature = false;
+    const queried = [];
+    const previousDependencies = app.locals.dnssecValidationDependencies;
+    app.locals.dnssecValidationDependencies = {
+        getZoneApex: async () => ({
+            zoneApex: zone,
+            parentNs: 'ns.example.test',
+            currentNs: 'ns.child.example.test',
+            parentNameservers: ['ns.example.test'],
+            childNameservers: ['ns.child.example.test'],
+            rcode: 'NOERROR',
+            hasCnameOrDname: false,
+            cname: { owner: domain, target: 'target.example.net' }
+        }),
+        getARecord: async nameserver => nameserver === 'ns.example.test' ? parentIp : childIp,
+        getResourceRecord: async (queryName, serverIp, recordType) => {
+            if (recordType === 'DS') return response([dsRecord], [dsSignature]);
+            if (recordType === 'DNSKEY' && serverIp === parentIp) return response([parentDnskey]);
+            if (recordType === 'DNSKEY') return response(childDnskeys, [dnskeySignature]);
+            queried.push(`${recordType} ${queryName}`);
+            if (recordType === 'CNAME' && queryName === domain) {
+                const signature = { ...cnameSignature, data: { ...cnameSignature.data, signature: Buffer.from(cnameSignature.data.signature) } };
+                if (corruptSignature) signature.data.signature[0] ^= 1;
+                return response(cnameRecords, [signature]);
+            }
+            throw new Error(`Unexpected query ${recordType} for ${queryName}`);
+        },
+        compareAuthorityRecordSets: async (zoneName, nameservers, recordType) => ({
+            recordType, complete: true, consistent: true, hasDifferences: false, servers: []
+        }),
+        diagnoseDsProposals: async () => ({ parentDs: [], cds: null, cdnskey: null, notes: [] })
+    };
+
+    const server = app.listen(0);
+    const validate = async (recordType = 'A') => JSON.parse((await request(server, {
+        method: 'POST',
+        path: '/api/validate',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, recordType })
+    })).body);
+    try {
+        const secure = await validate();
+        const validation = secure.diagram.child.aRecordValidation;
+        assert.equal(secure.status, 'secure');
+        assert.equal(secure.statusLabel, 'Secure（CNAMEを検証）');
+        assert.equal(secure.success, true);
+        assert.equal(validation.recordType, 'A');
+        assert.equal(validation.signedRecordType, 'CNAME');
+        assert.equal(validation.signatures[0].trustChainVerified, true);
+        assert.deepEqual(validation.cname, { owner: domain, target: 'target.example.net', valid: true });
+        assert.ok(secure.logs.some(line => line.includes('target.example.net') && line.includes('改めて検証')));
+        // 選択した A ではなく、入力名の CNAME RRset を検証対象にする
+        assert.deepEqual(queried, [`CNAME ${domain}`]);
+
+        // CNAME レコード自体の検証を選んだ場合は、通常の成功として扱う
+        const explicit = await validate('CNAME');
+        assert.equal(explicit.status, 'secure');
+        assert.equal(explicit.statusLabel, 'Secure（検証成功）');
+
+        corruptSignature = true;
+        const tampered = await validate();
+        assert.equal(tampered.status, 'bogus');
+        assert.equal(tampered.success, false);
+        assert.equal(tampered.diagram.child.aRecordValidation.signatures[0].trustChainVerified, false);
+
+        corruptSignature = false;
+        cnameRecords = [];
+        const missing = await validate();
+        assert.equal(missing.status, 'indeterminate');
+        assert.match(missing.diagram.child.aRecordValidation.error, /CNAME レコードを取得できませんでした/);
+    } finally {
+        if (previousDependencies === undefined) delete app.locals.dnssecValidationDependencies;
+        else app.locals.dnssecValidationDependencies = previousDependencies;
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('CNAME RRset が複数レコードの場合は成功にしない', () => {
+    const diagram = {
+        checks: { dsSignature: true, dnskeySignature: true, dsKeyMatch: true },
+        parent: { ds: [{}] },
+        child: {
+            dnskey: [{}],
+            aRecordValidation: {
+                queried: true, recordType: 'A', recordsFound: true,
+                signatures: [{ trustChainVerified: true }],
+                cname: { owner: 'www.example.test', target: '', valid: false }
+            }
+        }
+    };
+    assert.equal(isValidationSuccessful(diagram), false);
+    assert.equal(classifyValidationResult(diagram).statusLabel, '判定不能（CNAME RRsetが不正）');
 });

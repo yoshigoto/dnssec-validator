@@ -14,6 +14,7 @@
 - 親ゾーンの DS と子ゾーンの DNSKEY・RRSIG を検証
 - A、AAAA、CNAME、MX、NS、TXT、CAA、SRV のいずれかを選び、対象レコードの署名または NSEC / NSEC3 による不在証明を検証
 - 入力した名前が DNAME の配下にある場合は、DNAME を持つゾーンの信頼の連鎖と DNAME RRset の署名を検証し、書き換え後の名前を表示
+- 入力した名前が CNAME の場合は、CNAME を持つゾーンの信頼の連鎖と CNAME RRset の署名を検証し、参照先の名前を表示
 - 親・子の権威サーバー間で NS、DS、DNSKEY の応答を比較
 - CDS / CDNSKEY の提案と親の DS の差分を表示（親への変更や提案の署名検証は行いません）
 - 検証結果を図示し、RRSIG の有効期限を日本時間で表示（期限まで7日以内の場合は警告）
@@ -213,6 +214,7 @@ Content-Type: application/json
 
 - DNS の応答は権威サーバーやネットワークの状態に左右されるため、タイムアウトや一時的な検証失敗が発生する場合があります。
 - 入力した名前が DNAME（RFC 6672）の配下にある場合は、選択したレコード種別ではなく、署名済みの DNAME RRset を検証します。権威サーバーが返す合成 CNAME には署名が付かないため、DNAME から書き換え後の名前を算出し、応答の CNAME と一致するかを確認します。結果は `diagram.child.aRecordValidation` の `signedRecordType`（`DNAME`）と `dname`（`owner`、`target`、`synthesizedName`、`cnameMatches`）に入ります。書き換え先の名前は別のゾーンに属するため追跡しません。その名前で改めて検証してください。
-- 入力した名前自体が CNAME の場合や、問い合わせ名の上位にない DNAME が返された場合は、ゾーン頂点を特定できず検証できません。
+- 入力した名前自体が CNAME の場合は、選択したレコード種別ではなく、署名済みの CNAME RRset を検証します（選択したレコードは参照先の名前にしか存在しないためです）。CNAME の所有者名はゾーン頂点になれないので、1 つ上の名前から CNAME を持つゾーンを特定します。結果は `diagram.child.aRecordValidation` の `signedRecordType`（`CNAME`）と `cname`（`owner`、`target`、`valid`）に入ります。参照先の名前は追跡しません。その名前で改めて検証してください。
+- 問い合わせ名と異なる名前の CNAME や、問い合わせ名の上位にない DNAME が返された場合は、ゾーン頂点を特定できず検証できません。
 - 検証結果はその時点で取得した DNS 応答に基づく診断結果です。DNSSEC の設定変更後はキャッシュや TTL の影響に注意してください。
 - 本番環境で公開する場合は、HTTPS、プロセス監視、ログ管理、必要に応じたリバースプロキシなどを別途構成してください。

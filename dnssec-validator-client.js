@@ -180,6 +180,12 @@ function rrsigExpirationText(expiration) {
     return ' / 期限日時 ' + expirationDate + ' JST / ' + remainingText + warning;
 }
 const rrsigText = records => !records || records.length === 0 ? ['取得できませんでした'] : records.map(record => 'RRSIG ' + record.typeCovered + ' / Key Tag ' + record.keyTag + ' / ' + algorithmText(record.algorithm) + ' -> 署名検証: ' + (record.verified === true ? '成功 ✓' : record.verified === false ? '失敗 ✕' : '未検証') + rrsigExpirationText(record.expiration));
+const secureLabel = diagram => {
+    const validation = diagram && diagram.child && diagram.child.aRecordValidation || {};
+    if (validation.dname) return 'Secure (DNAME redirection validated)';
+    if (validation.cname && validation.recordType !== 'CNAME') return 'Secure (CNAME validated)';
+    return 'Secure (validation succeeded)';
+};
 const aRecordValidationText = validation => {
     if (!validation || !validation.queried) return ['検証データを取得できませんでした'];
     const recordType = validation.recordType || 'A';
@@ -208,6 +214,9 @@ const aRecordValidationText = validation => {
         'DNAME: ' + dname.owner + ' -> ' + (dname.target || '.'),
         '書き換え後の名前: ' + (dname.synthesizedName || '算出できません ✕'),
         '応答のCNAME: ' + (dname.cnameMatches === true ? '合成結果と一致 ✓' : dname.cnameMatches === false ? '合成結果と不一致 ✕' : '応答に含まれていません')
+    ] : validation.cname ? [
+        // 入力名が CNAME の場合は、署名済みの CNAME RRset と参照先を表示する
+        'CNAME: ' + validation.cname.owner + ' -> ' + (validation.cname.target || '算出できません ✕')
     ] : [];
     if (validation.signatures.length === 0) return dnameLines.concat([`${signedType}レコードへのRRSIGの探索: 失敗 ✕`]);
     const trustChain = validation.trustChain || {};
@@ -420,7 +429,7 @@ async function validate(event) {
             const statusClasses = { secure: 'status-success', insecure: 'status-insecure', bogus: 'status-failed', indeterminate: 'status-indeterminate' };
             statusBox.className = 'result-status-box ' + (statusClasses[data.status] || 'status-indeterminate');
             statusBox.innerText = isEnglish
-                ? ({ secure: data.diagram && data.diagram.child && data.diagram.child.aRecordValidation && data.diagram.child.aRecordValidation.dname ? 'Secure (DNAME redirection validated)' : 'Secure (validation succeeded)', insecure: 'Insecure (unsigned delegation)', bogus: 'Bogus (DNSSEC validation failed)', indeterminate: data.timedOut ? 'Indeterminate (timeout)' : 'Indeterminate (insufficient validation data)' }[data.status] || 'Indeterminate')
+                ? ({ secure: secureLabel(data.diagram), insecure: 'Insecure (unsigned delegation)', bogus: 'Bogus (DNSSEC validation failed)', indeterminate: data.timedOut ? 'Indeterminate (timeout)' : 'Indeterminate (insufficient validation data)' }[data.status] || 'Indeterminate')
                 : data.statusLabel || (data.success ? 'Secure（検証成功）' : '判定不能');
             const detailLines = [...(data.logs || [])];
             if (detailLines.length > 0) {

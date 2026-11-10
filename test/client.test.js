@@ -464,3 +464,23 @@ for (const language of ['ja', 'en']) {
         assert.equal(ui.element('validation-error-details').style.display, 'block');
     });
 }
+
+for (const language of ['ja', 'en']) {
+    test(`CNAME の名前の検証結果を表示する (${language})`, async t => {
+        const result = makeResult('secure');
+        result.statusLabel = 'Secure（CNAMEを検証）';
+        result.logs = ['CNAME の参照先 [target.example.net] は、その名前で改めて検証してください。'];
+        Object.assign(result.diagram.child.aRecordValidation, {
+            signedRecordType: 'CNAME',
+            cname: { owner: 'www.example.test', target: 'target.example.net', valid: true }
+        });
+        const ui = createUi(t, { search: language === 'en' ? '?lang=en' : '', respond: () => jsonResponse(result) });
+        await ui.submit();
+
+        const text = ui.element('childARecordValidation').textContent;
+        assert.match(text, /CNAME: www\.example\.test -> target\.example\.net/);
+        assert.match(text, /ZSK -> CNAME RRset: RRSIG CNAME/);
+        assert.equal(ui.element('statusBox').innerText,
+            language === 'en' ? 'Secure (CNAME validated)' : result.statusLabel);
+    });
+}

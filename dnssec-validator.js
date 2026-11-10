@@ -60,6 +60,8 @@ const MAX_DNS_RESPONSE_CACHE_ENTRIES = 20000;
 const dnssecResponseCache = createDnsResponseCache(MAX_DNS_RESPONSE_CACHE_ENTRIES);
 const MAX_RATE_LIMIT_ENTRIES = 10000;
 // --- 攻撃者が制御する権威サーバー応答に対する計算量の上限 (KeyTrap / NSEC3 反復回数による CPU 枯渇対策) ---
+// CNAME を持つゾーンを探すために、上位の名前へ辿る回数の上限
+const MAX_CNAME_PARENT_LOOKUPS = 8;
 const MAX_NSEC3_ITERATIONS = 150; // RFC 9276: これを超える反復回数の NSEC3 は検証に使わない
 const MAX_NSEC3_HASH_COMPUTATIONS = 512; // 1回の不在証明解析で計算する NSEC3 ハッシュの上限
 const MAX_DENIAL_RECORDS = 32; // 1応答から解析対象とする NSEC/NSEC3 (およびその RRSIG) の上限
@@ -422,6 +424,7 @@ async function getZoneApex(domain, options = {}) {
     let rcode = '';
     let hasCnameOrDname = false;
     let dname = null;
+    let cname = null;
     let discoveryError = '';
 
     for (let i = 0; i < 10; i++) {
@@ -484,7 +487,12 @@ async function getZoneApex(domain, options = {}) {
                 if (answers.length > 0) {
                     const cnameRecord = answers.find(r => r.type === 'CNAME');
                     if (cnameRecord) {
-                        hasCnameOrDname = true;
+                        // 問い合わせ名そのものが CNAME の場合は、CNAME を持つゾーンで CNAME RRset の署名を検証できる
+                        if (normalizeResolverDnsName(cnameRecord.name) === normalizeResolverDnsName(domain)) {
+                            cname = { owner: normalizeResolverDnsName(domain), target: normalizeResolverDnsName(cnameRecord.data) };
+                        } else {
+                            hasCnameOrDname = true;
+                        }
                         break;
                     }
                     const dnameRecord = answers.find(r => r.type === 'DNAME');
@@ -581,6 +589,20 @@ async function getZoneApex(domain, options = {}) {
             return { ...ownerInfo, zoneApex: '', dname: undefined, hasCnameOrDname: true };
         }
         return { ...ownerInfo, dname };
+    }
+
+    if (cname) {
+        // CNAME の所有者名はゾーン頂点になれない (SOA / NS と共存できない) ため、1 つ上の名前が属するゾーンが
+        // CNAME を持つゾーンになる。上の名前も CNAME の場合はさらに上へ辿る (回数を制限する)
+        const parentName = cname.owner.split('.').slice(1).join('.');
+        const aliasDepth = options.aliasDepth || 0;
+        const parentInfo = parentName && aliasDepth < MAX_CNAME_PARENT_LOOKUPS
+            ? await getZoneApex(parentName, { ...options, dnsResponseCache, aliasDepth: aliasDepth + 1 })
+            : null;
+        if (parentInfo && parentInfo.zoneApex && !parentInfo.dname) {
+            return { ...parentInfo, cname };
+        }
+        hasCnameOrDname = true;
     }
 
     if (!zoneApex && lastDelegationZone && !hasCnameOrDname) {
@@ -1048,6 +1070,9 @@ function isValidationSuccessful(diagram) {
     if (aRecordValidation.dname && aRecordValidation.dname.synthesisVerified !== true) {
         return false;
     }
+    if (aRecordValidation.cname && aRecordValidation.cname.valid !== true) {
+        return false;
+    }
     if (aRecordValidation.recordsFound) {
         return aRecordValidation.signatures.some(signature => signature.trustChainVerified === true);
     }
@@ -1070,7 +1095,12 @@ function classifyValidationResult(diagram, timedOut = false) {
         return { status: 'indeterminate', statusLabel: '判定不能（DS不在を確認できません）', nextChecks: ['親側のNSEC/NSEC3不在証明とそのRRSIGが取得・検証できるか確認してください。', '親の権威サーバーへの疎通を確認して再試行してください。'] };
     }
     const dname = aRecordValidation && aRecordValidation.dname;
+    const cname = aRecordValidation && aRecordValidation.cname;
     if (isValidationSuccessful(diagram)) {
+        // CNAME レコード自体の検証を選んだ場合は通常の成功として扱う
+        if (cname && aRecordValidation.recordType !== 'CNAME') {
+            return { status: 'secure', statusLabel: 'Secure（CNAMEを検証）', nextChecks: [`CNAME の参照先 [${cname.target}] の ${aRecordValidation.recordType} レコードは、その名前で改めて検証してください。`] };
+        }
         if (dname) {
             return { status: 'secure', statusLabel: 'Secure（DNAMEによる書き換えを検証）', nextChecks: [`書き換え先の名前 [${dname.synthesizedName}] は別のゾーンに属するため、その名前で改めて検証してください。`] };
         }
@@ -1078,6 +1108,9 @@ function classifyValidationResult(diagram, timedOut = false) {
     }
     if (dname && dname.cnameMatches === false && aRecordValidation.signatures.some(signature => signature.trustChainVerified === true)) {
         return { status: 'bogus', statusLabel: 'Bogus（DNAMEと合成CNAMEの不一致）', nextChecks: ['権威サーバーが返す CNAME が、署名済みの DNAME から合成した名前と一致しているか確認してください。'] };
+    }
+    if (cname && cname.valid !== true && aRecordValidation.signatures.some(signature => signature.trustChainVerified === true)) {
+        return { status: 'indeterminate', statusLabel: '判定不能（CNAME RRsetが不正）', nextChecks: ['CNAME RRset が 1 レコードであることを確認してください。'] };
     }
     if (dname && dname.synthesisVerified !== true && aRecordValidation.signatures.some(signature => signature.trustChainVerified === true)) {
         return { status: 'indeterminate', statusLabel: '判定不能（DNAMEによる書き換え不可）', nextChecks: ['DNAME RRset が 1 レコードであること、書き換え後の名前が長さの上限に収まることを確認してください。'] };
@@ -1282,8 +1315,8 @@ function verifyRecordRrsig(records, rrsig, dnskeyRecord, domain) {
     rrsigHeader.writeUInt32BE(rrsig.data.inception, 12);
     rrsigHeader.writeUInt16BE(rrsig.data.keyTag, 16);
     const ownerName = encodeDomainNameCanonical(domain);
-    // DNAME のターゲットは DNSSEC の正規形では小文字にする (RFC 6672 Section 5.3.1)
-    const canonicalData = record => recordType === 'DNAME' ? String(record.data).toLowerCase() : record.data;
+    // CNAME / DNAME のターゲットは DNSSEC の正規形では小文字にする (RFC 4034 Section 6.2、RFC 6672 Section 5.3.1)
+    const canonicalData = record => ['CNAME', 'DNAME'].includes(recordType) ? String(record.data).toLowerCase() : record.data;
     const rdataList = records.map(record => dnsPacket.record(recordType).encode(canonicalData(record)).subarray(2)).sort(Buffer.compare);
     const rrWireRecords = rdataList.map(rdata => {
         const header = Buffer.alloc(10);
@@ -1739,6 +1772,10 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
         if (dnameInfo) {
             logs.push(`入力名は DNAME [${dnameInfo.owner}] → [${dnameInfo.target}] の配下です。DNAME を持つゾーン [${zoneApexInfo.zoneApex}] の信頼の連鎖と、DNAME による書き換えを検証します。`);
         }
+        const aliasCname = !dnameInfo && zoneApexInfo.cname || null;
+        if (aliasCname) {
+            logs.push(`入力名は CNAME [${aliasCname.owner}] → [${aliasCname.target}] です。CNAME を持つゾーン [${zoneApexInfo.zoneApex}] の信頼の連鎖と、CNAME RRset の署名を検証します。`);
+        }
         diagram.parent.name = zoneApexInfo.zoneApex;
         diagram.parent.server = zoneApexInfo.parentNameservers.join(', ') || zoneApexInfo.parentNs || zoneApexInfo.currentNs;
         diagram.child.name = zoneApexInfo.zoneApex;
@@ -2050,7 +2087,8 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
                 }
                 // DNAME 配下の名前では、署名の付かない合成 CNAME ではなく、署名済みの DNAME RRset を検証対象にする
                 const signedName = dnameInfo ? dnameInfo.owner : domain;
-                const signedRecordType = dnameInfo ? 'DNAME' : recordType;
+                // 入力名が CNAME の場合は、選択したレコード種別は参照先にしか無いため、CNAME RRset を検証対象にする
+                const signedRecordType = dnameInfo ? 'DNAME' : aliasCname ? 'CNAME' : recordType;
                 const aInfo = await fetchResourceRecord(signedName, childIp, signedRecordType);
                 aRecordValidation.recordsFound = aInfo.resourceRecords.length > 0;
                 if (dnameInfo) {
@@ -2070,6 +2108,21 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
                     if (aRecordValidation.dname.synthesisVerified) {
                         logs.push(`書き換え先の名前 [${aRecordValidation.dname.synthesizedName}] は別のゾーンに属するため、その名前で改めて検証してください。`);
                     }
+                }
+                if (aliasCname) {
+                    aRecordValidation.signedRecordType = signedRecordType;
+                    if (!aRecordValidation.recordsFound) {
+                        throw new Error(`CNAME レコードを取得できませんでした: ${domain}`);
+                    }
+                    const valid = aInfo.resourceRecords.length === 1;
+                    aRecordValidation.cname = {
+                        owner: normalizeDnsName(domain),
+                        target: valid ? normalizeDnsName(aInfo.resourceRecords[0].data) : '',
+                        valid
+                    };
+                    logs.push(valid
+                        ? `CNAME の参照先 [${aRecordValidation.cname.target}] は、その名前で改めて検証してください。`
+                        : `CNAME RRset は 1 レコードでなければなりません (${aInfo.resourceRecords.length} 件)。`);
                 }
                 for (const rrsig of aInfo.rrsigRecords) {
                     let verified = false;
@@ -2129,6 +2182,7 @@ app.post('/api/validate', withConcurrencyLimit(async (req, res) => {
         } else if (!success && diagram.child.aRecordValidation && !diagram.child.aRecordValidation.error) {
             logs.push(dnameInfo
                 ? 'DNAME レコードの署名、または DNAME による書き換えの検証に失敗しました。'
+                : aliasCname ? 'CNAME レコードの署名の検証に失敗しました。'
                 : `ドメイン名に対する${recordType}レコードの署名または不在証明の検証に失敗しました。`);
         }
 
