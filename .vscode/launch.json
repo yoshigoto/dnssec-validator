@@ -5,8 +5,7 @@
             "type": "node",
             "request": "launch",
             "name": "Start DNSSEC validator",
-            "program": "${workspaceFolder}/dnssec-validator.js",
-            "console": "integratedTerminal"
+            "program": "${workspaceFolder}/dnssec-validator.js"
         }
     ]
 }
