@@ -2,10 +2,11 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Start DNSSEC validator",
             "type": "node",
             "request": "launch",
-            "name": "Start DNSSEC validator",
-            "program": "${workspaceFolder}/dnssec-validator.js"
+            "program": "${workspaceFolder}/dnssec-validator.js",
+            "cwd": "${workspaceFolder}"
         }
     ]
 }
